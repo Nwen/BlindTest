@@ -2,27 +2,48 @@ import { useState, useEffect, useRef } from 'react';
 import PropTypes from 'prop-types';
 import socket from '../socket.js';
 import Scoreboard from '../components/Scoreboard.jsx';
+import { teamColorClasses } from '../teamColors.js';
 
 /**
- * Vue joueur : écoute la musique et soumet ses réponses.
+ * Vue joueur : écoute la musique et soumet ses réponses (mode 'text')
+ * ou buzze le plus vite possible (mode 'buzzer').
  *
  * playerInfo   : { name, roomCode }
  * initialState : état initial reçu lors du join
  */
 export default function PlayerView({ playerInfo, initialState }) {
   const [phase,        setPhase]        = useState(initialState?.phase        || 'lobby');
+  const [mode,         setMode]         = useState(initialState?.mode         || 'text');
   const [players,      setPlayers]      = useState(initialState?.players      || []);
+  const [teams,        setTeams]        = useState(initialState?.teams        || []);
   const [masterOnline, setMasterOnline] = useState(initialState?.masterOnline ?? true);
   const [artist,       setArtist]       = useState('');
   const [title,        setTitle]        = useState('');
   const [submitted,    setSubmitted]    = useState(false);
+  const [buzzed,       setBuzzed]       = useState(false);
+  const [buzzOrder,    setBuzzOrder]    = useState([]);
   const [results,      setResults]      = useState(null);
   const [audioUrl,     setAudioUrl]     = useState('');
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const [answerers,    setAnswerers]    = useState(new Set());
   const [gameOver,     setGameOver]     = useState(false);
   const audioRef = useRef(null);
 
-  const myId = socket.id;
+  const myId   = socket.id;
+  const me     = players.find(p => p.id === myId);
+  const myTeam = me?.teamId ? teams.find(t => t.id === me.teamId) : null;
+  const myBuzz = buzzOrder.find(b => b.playerId === myId);
+
+  // ── Neutraliser les contrôles média OS/matériels (touches clavier, casque…) ──
+  // Seul le maître du jeu pilote la lecture ; on empêche les joueurs de la couper.
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    const noop = () => {};
+    const actions = ['play', 'pause', 'stop', 'seekto', 'seekbackward', 'seekforward', 'previoustrack', 'nexttrack'];
+    for (const action of actions) {
+      try { navigator.mediaSession.setActionHandler(action, noop); } catch { /* action non supportée par ce navigateur */ }
+    }
+  }, []);
 
   // ── Events socket ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -41,15 +62,17 @@ export default function PlayerView({ playerInfo, initialState }) {
       setAudioUrl(url);
       setPhase('playing');
       setSubmitted(false);
+      setBuzzed(false);
+      setBuzzOrder([]);
       setAnswerers(new Set());
       setResults(null);
       // Lancer l'audio
       if (audioRef.current) {
         audioRef.current.src = url;
         audioRef.current.load();
-        audioRef.current.play().catch(() => {
-          // Autoplay bloqué — l'utilisateur doit cliquer
-        });
+        audioRef.current.play()
+          .then(() => setAudioBlocked(false))
+          .catch(() => setAudioBlocked(true)); // autoplay bloqué — l'utilisateur doit débloquer le son
       }
     }
 
@@ -65,6 +88,11 @@ export default function PlayerView({ playerInfo, initialState }) {
       setAnswerers(prev => new Set([...prev, playerId]));
     }
 
+    function onBuzzUpdate({ buzzOrder: order }) {
+      setBuzzOrder(order);
+      if (order.some(b => b.playerId === myId)) setBuzzed(true);
+    }
+
     function onResultsRevealed(data) {
       setResults(data);
       setPhase('results');
@@ -75,6 +103,8 @@ export default function PlayerView({ playerInfo, initialState }) {
       setArtist('');
       setTitle('');
       setSubmitted(false);
+      setBuzzed(false);
+      setBuzzOrder([]);
       setResults(null);
       setAnswerers(new Set());
       setAudioUrl('');
@@ -92,7 +122,9 @@ export default function PlayerView({ playerInfo, initialState }) {
 
     function onState(s) {
       setPhase(s.phase);
+      setMode(s.mode);
       setPlayers(s.players);
+      setTeams(s.teams || []);
       if (s.masterOnline !== undefined) setMasterOnline(s.masterOnline);
     }
 
@@ -105,6 +137,7 @@ export default function PlayerView({ playerInfo, initialState }) {
     socket.on('track-playing',    onTrackPlaying);
     socket.on('track-stopped',    onTrackStopped);
     socket.on('someone-answered', onSomeoneAnswered);
+    socket.on('buzz-update',      onBuzzUpdate);
     socket.on('results-revealed', onResultsRevealed);
     socket.on('round-reset',      onRoundReset);
     socket.on('game-over',        onGameOver);
@@ -118,6 +151,7 @@ export default function PlayerView({ playerInfo, initialState }) {
       socket.off('track-playing',    onTrackPlaying);
       socket.off('track-stopped',    onTrackStopped);
       socket.off('someone-answered', onSomeoneAnswered);
+      socket.off('buzz-update',      onBuzzUpdate);
       socket.off('results-revealed', onResultsRevealed);
       socket.off('round-reset',      onRoundReset);
       socket.off('game-over',        onGameOver);
@@ -139,8 +173,23 @@ export default function PlayerView({ playerInfo, initialState }) {
     setSubmitted(false);
   }
 
+  // ── Débloquer l'audio si l'autoplay a été refusé par le navigateur ─────────
+  function handleUnlockAudio() {
+    audioRef.current?.play().then(() => setAudioBlocked(false)).catch(() => {});
+  }
+
+  // ── Buzzer ──────────────────────────────────────────────────────────────────
+  function handleBuzz() {
+    if (phase !== 'playing' || buzzed) return;
+    socket.emit('buzz');
+    setBuzzed(true);
+  }
+
   // ── Mon résultat dans le round ─────────────────────────────────────────────
   const myResult = results?.results?.find(r => r.playerId === myId);
+
+  let buzzButtonLabel = 'BUZZ !';
+  if (buzzed) buzzButtonLabel = myBuzz ? `#${myBuzz.order} !` : 'Buzzé !';
 
   // ── Affichage ──────────────────────────────────────────────────────────────
   return (
@@ -154,6 +203,11 @@ export default function PlayerView({ playerInfo, initialState }) {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {myTeam && (
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${teamColorClasses(myTeam.color).badge}`}>
+              {myTeam.name}
+            </span>
+          )}
           <span className="text-sm text-gray-300 font-medium">{playerInfo.name}</span>
           <PhaseBadge phase={phase} />
         </div>
@@ -166,11 +220,62 @@ export default function PlayerView({ playerInfo, initialState }) {
         </div>
       )}
 
-      {/* Lecteur audio */}
-      <audio ref={audioRef} controls className="w-full rounded-lg bg-gray-800 accent-sky-500" />
+      {/* Lecteur audio — sans contrôles : seul le maître pilote play/pause/skip */}
+      <audio ref={audioRef} className="hidden" />
 
-      {/* Formulaire de réponse — toujours visible pendant la partie */}
-      {(phase === 'playing' || phase === 'stopped') && !gameOver && (
+      {phase === 'playing' && (
+        <div className="bg-gray-800 rounded-2xl px-4 py-3 flex items-center justify-center">
+          {audioBlocked ? (
+            <button
+              onClick={handleUnlockAudio}
+              className="bg-sky-600 hover:bg-sky-500 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors"
+            >
+              🔊 Activer le son
+            </button>
+          ) : (
+            <span className="flex items-center gap-2 text-green-300 text-sm">
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" /> Lecture en cours…
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Buzzer — mode 'buzzer' */}
+      {mode === 'buzzer' && (phase === 'playing' || phase === 'stopped') && !gameOver && (
+        <div className="bg-gray-800 rounded-2xl p-4 space-y-3">
+          <button
+            onClick={handleBuzz}
+            disabled={phase !== 'playing' || buzzed}
+            className={`w-full aspect-[3/1] rounded-2xl text-2xl font-extrabold uppercase tracking-widest
+                        transition-all active:scale-95 disabled:cursor-not-allowed ${
+              buzzed
+                ? 'bg-gray-700 text-gray-500'
+                : 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/50'
+            }`}
+          >
+            {buzzButtonLabel}
+          </button>
+
+          {buzzOrder.length > 0 && (
+            <ol className="space-y-1">
+              {buzzOrder.map(b => (
+                <li
+                  key={b.playerId}
+                  className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg ${
+                    b.playerId === myId ? 'bg-sky-900/40 border border-sky-700/40' : 'bg-gray-700/50'
+                  }`}
+                >
+                  <span className="w-6 text-center shrink-0 text-gray-400">#{b.order}</span>
+                  <span className="flex-1 truncate font-medium text-white">{b.playerName}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+
+      {/* Formulaire de réponse — mode 'text' */}
+      {mode === 'text' && (phase === 'playing' || phase === 'stopped') && !gameOver && (
         <div className="bg-gray-800 rounded-2xl p-4 space-y-3">
           <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
             {phase === 'playing' ? 'Ta réponse' : 'La musique est stoppée'}
@@ -280,18 +385,28 @@ export default function PlayerView({ playerInfo, initialState }) {
           )}
 
           <details className="text-xs text-gray-400">
-            <summary className="cursor-pointer hover:text-white">Voir toutes les réponses</summary>
+            <summary className="cursor-pointer hover:text-white">
+              {mode === 'buzzer' ? 'Voir le classement des buzzs' : 'Voir toutes les réponses'}
+            </summary>
             <div className="mt-2 space-y-1">
               {results.results.map(r => (
                 <div key={r.playerId} className="flex items-center gap-2">
                   <span className="font-medium text-gray-300 w-24 truncate">{r.playerName}</span>
-                  <span className={r.awards?.artist ? 'text-green-400' : 'text-gray-500'}>
-                    {r.answer.artist || '—'}
-                  </span>
-                  <span className="text-gray-600">·</span>
-                  <span className={r.awards?.title ? 'text-green-400' : 'text-gray-500'}>
-                    {r.answer.title || '—'}
-                  </span>
+                  {mode === 'buzzer' ? (
+                    <span className="text-gray-500">
+                      {r.buzz ? `#${r.buzz.order}` : "N'a pas buzzé"}
+                    </span>
+                  ) : (
+                    <>
+                      <span className={r.awards?.artist ? 'text-green-400' : 'text-gray-500'}>
+                        {r.answer.artist || '—'}
+                      </span>
+                      <span className="text-gray-600">·</span>
+                      <span className={r.awards?.title ? 'text-green-400' : 'text-gray-500'}>
+                        {r.answer.title || '—'}
+                      </span>
+                    </>
+                  )}
                   {r.roundPoints > 0 && (
                     <span className="ml-auto text-yellow-400 font-bold">+{r.roundPoints}</span>
                   )}
@@ -313,7 +428,7 @@ export default function PlayerView({ playerInfo, initialState }) {
       {/* Classement */}
       <div className="bg-gray-800 rounded-2xl p-4">
         <h3 className="text-xs text-gray-400 uppercase tracking-wide mb-3">Classement</h3>
-        <Scoreboard players={players} myId={myId} />
+        <Scoreboard players={players} teams={teams} myId={myId} />
       </div>
 
       {/* Attente */}
@@ -348,7 +463,9 @@ PlayerView.propTypes = {
   }).isRequired,
   initialState: PropTypes.shape({
     phase:        PropTypes.string,
+    mode:         PropTypes.string,
     players:      PropTypes.array,
+    teams:        PropTypes.array,
     masterOnline: PropTypes.bool,
   }),
 };

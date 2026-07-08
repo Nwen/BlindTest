@@ -32,7 +32,6 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
       <div className="mb-8 text-center">
         <div className="text-6xl mb-3">🎵</div>
         <h1 className="text-4xl font-bold text-white tracking-tight">BlindTest</h1>
-        <p className="text-gray-400 mt-1">Devine l'artiste et le titre !</p>
       </div>
 
       {/* Card */}
@@ -89,7 +88,7 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
                   type="text"
                   value={name}
                   onChange={e => setName(e.target.value)}
-                  placeholder="ex : Alice"
+                  placeholder="ex : Nwen"
                   maxLength={20}
                   className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3
                              text-white placeholder-gray-500

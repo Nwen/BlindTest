@@ -3,6 +3,8 @@ import socket from '../socket.js';
 import Scoreboard    from '../components/Scoreboard.jsx';
 import PlaylistPanel from '../components/PlaylistPanel.jsx';
 import FileBrowser   from '../components/FileBrowser.jsx';
+import TeamManager   from '../components/TeamManager.jsx';
+import BuzzerPanel   from '../components/BuzzerPanel.jsx';
 
 /**
  * Vue maître du jeu.
@@ -14,13 +16,16 @@ export default function MasterView({ masterInfo, initialState }) {
   const { roomCode, masterToken: token } = masterInfo;
 
   const [phase,          setPhase]        = useState(initialState?.phase    || 'lobby');
+  const [mode,           setMode]         = useState(initialState?.mode    || 'text');
   const [players,        setPlayers]      = useState(initialState?.players  || []);
+  const [teams,          setTeams]        = useState(initialState?.teams    || []);
   const [playlist,       setPlaylist]     = useState(initialState?.playlist || []);
   const [currentIndex,   setCurrentIndex] = useState(initialState?.currentTrackIndex ?? -1);
   const [currentMeta,    setCurrentMeta]  = useState(null);
   const [results,        setResults]      = useState([]);    // getRoundResults()
   const [answers,        setAnswers]      = useState({});    // socketId → { artist, title }
-  const [roundAwards,    setRoundAwards]  = useState({});    // socketId → { artist, title }
+  const [roundAwards,    setRoundAwards]  = useState({});    // socketId → { artist, title } | points
+  const [buzzOrder,      setBuzzOrder]    = useState([]);    // classement des buzzs en direct
   const [showBrowser,    setShowBrowser]  = useState(false);
   const [audioUrl,       setAudioUrl]     = useState('');
   const [copied,         setCopied]       = useState(false);
@@ -32,7 +37,9 @@ export default function MasterView({ masterInfo, initialState }) {
   useEffect(() => {
     function onState(s) {
       setPhase(s.phase);
+      setMode(s.mode);
       setPlayers(s.players);
+      setTeams(s.teams || []);
       setCurrentIndex(s.currentTrackIndex);
     }
 
@@ -61,6 +68,7 @@ export default function MasterView({ masterInfo, initialState }) {
       setResults([]);
       setAnswers({});
       setRoundAwards({});
+      setBuzzOrder([]);
       if (audioRef.current) {
         audioRef.current.src = url;
         audioRef.current.load();
@@ -95,6 +103,10 @@ export default function MasterView({ masterInfo, initialState }) {
       setResults(res);
     }
 
+    function onBuzzUpdate({ buzzOrder: order }) {
+      setBuzzOrder(order);
+    }
+
     function onResultsRevealed({ results: res }) {
       setResults(res);
       setPhase('results');
@@ -107,6 +119,7 @@ export default function MasterView({ masterInfo, initialState }) {
       setResults([]);
       setAnswers({});
       setRoundAwards({});
+      setBuzzOrder([]);
       setAudioUrl('');
       if (audioRef.current) {
         audioRef.current.src = '';
@@ -132,6 +145,7 @@ export default function MasterView({ masterInfo, initialState }) {
     socket.on('answers-snapshot',  onAnswersSnapshot);
     socket.on('results-update',    onResultsUpdate);
     socket.on('results-revealed',  onResultsRevealed);
+    socket.on('buzz-update',       onBuzzUpdate);
     socket.on('round-reset',       onRoundReset);
     socket.on('game-over',         onGameOver);
 
@@ -148,6 +162,7 @@ export default function MasterView({ masterInfo, initialState }) {
       socket.off('answers-snapshot',  onAnswersSnapshot);
       socket.off('results-update',    onResultsUpdate);
       socket.off('results-revealed',  onResultsRevealed);
+      socket.off('buzz-update',       onBuzzUpdate);
       socket.off('round-reset',       onRoundReset);
       socket.off('game-over',         onGameOver);
     };
@@ -206,6 +221,35 @@ export default function MasterView({ masterInfo, initialState }) {
     await cmd('master:award', { playerId, field, value });
   }
 
+  async function handleBuzzerAward(playerId, points) {
+    const res = await cmd('master:buzzer-award', { playerId, points });
+    if (!res?.ok) notify(res?.error || 'Erreur');
+  }
+
+  async function handleBuzzerAwardTeam(teamId, points) {
+    const res = await cmd('master:buzzer-award', { teamId, points });
+    if (!res?.ok) notify(res?.error || 'Erreur');
+  }
+
+  async function handleSetMode(newMode) {
+    if (newMode === mode) return;
+    const res = await cmd('master:set-mode', { mode: newMode });
+    if (res.ok) setMode(newMode);
+    else notify(res.error || 'Erreur');
+  }
+
+  async function handleCreateTeam(name) {
+    await cmd('master:create-team', { name });
+  }
+
+  async function handleDeleteTeam(teamId) {
+    await cmd('master:delete-team', { teamId });
+  }
+
+  async function handleAssignTeam(playerId, teamId) {
+    await cmd('master:assign-team', { playerId, teamId });
+  }
+
   async function handleAddYoutube(url) {
     await cmd('master:add-youtube', { url });
   }
@@ -252,6 +296,25 @@ export default function MasterView({ masterInfo, initialState }) {
         <div className="flex items-center gap-2 bg-gray-800 rounded-xl px-3 py-1.5" title="Note ce code pour reprendre la partie si tu te déconnectes">
           <span className="text-xs text-gray-400 uppercase tracking-wide">Code MJ</span>
           <span className="font-mono font-bold text-sm text-violet-300 tracking-widest">{token}</span>
+        </div>
+
+        {/* Mode de jeu */}
+        <div
+          className="flex items-center bg-gray-800 rounded-xl p-1 gap-1"
+          title={phase === 'playing' ? 'Impossible de changer de mode pendant la lecture' : ''}
+        >
+          {[{ id: 'text', label: 'Texte' }, { id: 'buzzer', label: 'Buzzer' }].map(m => (
+            <button
+              key={m.id}
+              onClick={() => handleSetMode(m.id)}
+              disabled={phase === 'playing'}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                mode === m.id ? 'bg-sky-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
         </div>
 
         {notification && (
@@ -373,8 +436,18 @@ export default function MasterView({ masterInfo, initialState }) {
             </div>
           </div>
 
-          {/* Réponses des joueurs (phase stopped ou results) */}
-          {(phase === 'stopped' || phase === 'results') && results.length > 0 && (
+          {/* Buzzers en direct (mode 'buzzer', pendant la lecture) */}
+          {mode === 'buzzer' && phase === 'playing' && (
+            <BuzzerPanel live buzzOrder={buzzOrder} teams={teams} onAward={handleBuzzerAward} onAwardTeam={handleBuzzerAwardTeam} />
+          )}
+
+          {/* Attribution des points (mode 'buzzer', phase stopped ou results) */}
+          {mode === 'buzzer' && (phase === 'stopped' || phase === 'results') && results.length > 0 && (
+            <BuzzerPanel rows={results} teams={teams} onAward={handleBuzzerAward} onAwardTeam={handleBuzzerAwardTeam} />
+          )}
+
+          {/* Réponses des joueurs (mode 'text', phase stopped ou results) */}
+          {mode === 'text' && (phase === 'stopped' || phase === 'results') && results.length > 0 && (
             <div className="bg-gray-800 rounded-2xl p-4 space-y-3">
               <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
                 Réponses {phase === 'results' ? '& points attribués' : '— attribuer les points'}
@@ -456,6 +529,15 @@ export default function MasterView({ masterInfo, initialState }) {
             </div>
           )}
 
+          {/* Équipes */}
+          <TeamManager
+            players={players}
+            teams={teams}
+            onCreateTeam={handleCreateTeam}
+            onDeleteTeam={handleDeleteTeam}
+            onAssignTeam={handleAssignTeam}
+          />
+
           {/* Classement */}
           <div className="bg-gray-800 rounded-2xl p-4">
             <h3 className="text-xs text-gray-400 uppercase tracking-wide mb-3">
@@ -466,7 +548,7 @@ export default function MasterView({ masterInfo, initialState }) {
                 En attente de joueurs… (code : <strong className="font-mono text-white">{roomCode}</strong>)
               </p>
             ) : (
-              <Scoreboard players={players} />
+              <Scoreboard players={players} teams={teams} />
             )}
           </div>
 

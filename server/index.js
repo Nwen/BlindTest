@@ -122,10 +122,10 @@ io.on('connection', (socket) => {
     cb?.({ ok: true, state: game.getMasterState() });
   });
 
-  // ── Soumettre une réponse (joueur) ────────────────────────────────────────
+  // ── Soumettre une réponse (joueur, mode 'text') ────────────────────────────
   socket.on('submit-answer', ({ artist, title } = {}) => {
     const game = gm.getGameBySocket(socket.id);
-    if (!game || game.phase !== 'playing') return;
+    if (!game || game.phase !== 'playing' || game.mode !== 'text') return;
     if (game.masterId === socket.id) return;
 
     game.submitAnswer(socket.id, { artist, title });
@@ -138,6 +138,22 @@ io.on('connection', (socket) => {
       answer:     { artist: (artist || '').trim(), title: (title || '').trim() },
     });
     socket.to(game.id).except(game.masterId).emit('someone-answered', { playerId: socket.id });
+  });
+
+  // ── Buzzer (joueur, mode 'buzzer') ─────────────────────────────────────────
+  socket.on('buzz', () => {
+    const game = gm.getGameBySocket(socket.id);
+    if (!game || game.phase !== 'playing' || game.mode !== 'buzzer') return;
+    if (game.masterId === socket.id) return;
+
+    const entry = game.registerBuzz(socket.id);
+    if (!entry) return; // déjà buzzé, ou équipe déjà verrouillée
+
+    const player    = game.players.get(socket.id);
+    const buzzOrder = game.getLiveBuzzOrder();
+    log.event(`[${game.id}] Buzz #${entry.order} : "${player?.name}" (${entry.reactionMs ?? '?'}ms)`);
+
+    io.to(game.id).emit('buzz-update', { buzzOrder });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -274,6 +290,7 @@ io.on('connection', (socket) => {
     game.currentTrackIndex = idx;
     game.phase = 'playing';
     game.resetRound();
+    game.trackStartedAt = Date.now();
 
     const audioUrl = track.type === 'local'
       ? `/api/media/stream?path=${encodeURIComponent(track.filePath)}`
@@ -306,7 +323,7 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
   });
 
-  // ── Attribuer / retirer un point (maître) ─────────────────────────────────
+  // ── Attribuer / retirer un point (maître, mode 'text') ────────────────────
   socket.on('master:award', ({ token, playerId, field, value } = {}, cb) => {
     const game = asMaster(socket, token);
     if (!game) return cb?.({ ok: false });
@@ -318,6 +335,82 @@ io.on('connection', (socket) => {
     broadcastPlayerState(game);
     io.to(socket.id).emit('results-update', game.getRoundResults());
     cb?.({ ok: true });
+  });
+
+  // ── Attribuer des points (maître, mode 'buzzer') ───────────────────────────
+  socket.on('master:buzzer-award', ({ token, playerId, teamId, points } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    try {
+      if (teamId) {
+        game.setBuzzerPointsForTeam(teamId, points);
+        log.event(`[${game.id}] ${points} pt(s) attribué(s) à l'équipe "${game.teams.get(teamId)?.name}"`);
+      } else {
+        game.setBuzzerPoints(playerId, points);
+        const playerName = game.players.get(playerId)?.name || playerId;
+        log.event(`[${game.id}] ${points} pt(s) attribué(s) : "${playerName}"`);
+      }
+      broadcastPlayerState(game);
+      io.to(socket.id).emit('results-update', game.getRoundResults());
+      cb?.({ ok: true });
+    } catch (err) {
+      cb?.({ ok: false, error: err.message });
+    }
+  });
+
+  // ── Changer le mode de jeu ('text' | 'buzzer') ─────────────────────────────
+  socket.on('master:set-mode', ({ token, mode } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+    if (game.phase === 'playing') return cb?.({ ok: false, error: 'Impossible pendant la lecture' });
+
+    try {
+      game.setMode(mode);
+      log.info(`[${game.id}] Mode de jeu → ${mode}`);
+      broadcastPlayerState(game);
+      cb?.({ ok: true });
+    } catch (err) {
+      cb?.({ ok: false, error: err.message });
+    }
+  });
+
+  // ── Créer une équipe ────────────────────────────────────────────────────────
+  socket.on('master:create-team', ({ token, name } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    const team = game.createTeam(name);
+    log.info(`[${game.id}] Équipe créée : "${team.name}"`);
+    broadcastPlayerState(game);
+    cb?.({ ok: true, team });
+  });
+
+  // ── Supprimer une équipe ────────────────────────────────────────────────────
+  socket.on('master:delete-team', ({ token, teamId } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    game.deleteTeam(teamId);
+    log.info(`[${game.id}] Équipe supprimée : ${teamId}`);
+    broadcastPlayerState(game);
+    cb?.({ ok: true });
+  });
+
+  // ── Assigner un joueur à une équipe (teamId=null pour retirer) ─────────────
+  socket.on('master:assign-team', ({ token, playerId, teamId } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    try {
+      game.assignPlayerTeam(playerId, teamId || null);
+      const playerName = game.players.get(playerId)?.name || playerId;
+      log.info(`[${game.id}] "${playerName}" → équipe ${teamId || '(aucune)'}`);
+      broadcastPlayerState(game);
+      cb?.({ ok: true });
+    } catch (err) {
+      cb?.({ ok: false, error: err.message });
+    }
   });
 
   // ── Révéler les résultats ─────────────────────────────────────────────────
