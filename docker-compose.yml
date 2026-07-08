@@ -1,0 +1,20 @@
+services:
+  blindtest:
+    build: .
+    container_name: blindtest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-32001}:3000"
+    volumes:
+      # Bibliothèque musicale (lecture seule)
+      - ${MUSIC_LIBRARY_PATH}:/media:ro
+      # Cache des téléchargements YouTube (persistant entre redémarrages)
+      - yt-cache:/tmp/blindtest
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  yt-cache:
