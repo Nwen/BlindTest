@@ -72,7 +72,7 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
                   type="text"
                   value={roomCode}
                   onChange={e => setRoomCode(e.target.value.toUpperCase())}
-                  placeholder="ex : AB3X7Z"
+                  placeholder="ex : AB3X"
                   maxLength={6}
                   className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3
                              text-white text-lg tracking-widest font-mono placeholder-gray-500
@@ -91,7 +91,7 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
                   placeholder="ex : Nwen"
                   maxLength={20}
                   className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3
-                             text-white placeholder-gray-500
+                             text-white text-lg tracking-widest font-mono placeholder-gray-500
                              focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
                 />
               </div>
@@ -138,7 +138,7 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
                   type="text"
                   value={mjRoomCode}
                   onChange={e => setMjRoomCode(e.target.value.toUpperCase())}
-                  placeholder="ex : AB3X7Z"
+                  placeholder="ex : AB3X"
                   maxLength={6}
                   className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3
                              text-white text-lg tracking-widest font-mono placeholder-gray-500
@@ -147,14 +147,14 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
               </div>
               <div>
                 <label htmlFor="mj-token" className="block text-xs text-gray-400 mb-1 uppercase tracking-wide">
-                  Code maître (8 caractères)
+                  Code maître (mot de 8 lettres)
                 </label>
                 <input
                   id="mj-token"
                   type="text"
                   value={mjToken}
                   onChange={e => setMjToken(e.target.value.toUpperCase())}
-                  placeholder="ex : A3BX7Z2K"
+                  placeholder="ex : SANDWICH"
                   maxLength={8}
                   className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3
                              text-white text-lg tracking-widest font-mono placeholder-gray-500

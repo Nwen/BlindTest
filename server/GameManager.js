@@ -1,6 +1,7 @@
 'use strict';
 
 const { v4: uuidv4 } = require('uuid');
+const { WORDS_8 } = require('./words8');
 
 // ─── Constantes ─────────────────────────────────────────────────────────────
 
@@ -21,13 +22,18 @@ function generateCode(len = 6) {
   return code;
 }
 
+// Choisit un mot anglais de 8 lettres au hasard, pour un code maître mémorisable.
+function generateWordToken() {
+  return WORDS_8[Math.floor(Math.random() * WORDS_8.length)];
+}
+
 // ─── Classe Game ──────────────────────────────────────────────────────────────
 
 class Game {
   constructor(masterSocketId) {
     this.id          = generateCode(4);
-    // Code court (8 chars) que le maître peut noter pour se reconnecter manuellement
-    this.masterToken = generateCode(8);
+    // Mot de 8 lettres que le maître peut noter pour se reconnecter manuellement
+    this.masterToken = generateWordToken();
     this.masterId    = masterSocketId;
     this.masterOnline        = true;
     this.masterReconnectTimer = null; // setTimeout handle
