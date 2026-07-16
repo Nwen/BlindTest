@@ -23,6 +23,8 @@ const STATUS_LABEL = {
  * onImportPlaylist(url)
  * onOpenBrowser()
  * onRemove(index)
+ * onRetry(index)
+ * onShuffle()
  * onPlay(index)
  */
 export default function PlaylistPanel({
@@ -32,6 +34,8 @@ export default function PlaylistPanel({
   onImportPlaylist,
   onOpenBrowser,
   onRemove,
+  onRetry,
+  onShuffle,
   onPlay,
 }) {
   const [ytUrl,   setYtUrl]   = useState('');
@@ -80,6 +84,18 @@ export default function PlaylistPanel({
       {/* Liste de pistes */}
       {tab === 'list' && (
         <div className="overflow-y-auto flex-1 space-y-1 p-2">
+          {playlist.length > 1 && (
+            <div className="flex justify-end px-1 pb-1">
+              <button
+                onClick={onShuffle}
+                title="Mélanger l'ordre des pistes"
+                className="text-xs text-gray-400 hover:text-white flex items-center gap-1 px-2 py-1
+                           rounded transition-colors hover:bg-gray-700/50"
+              >
+                🔀 Mélanger
+              </button>
+            </div>
+          )}
           {playlist.length === 0 && (
             <p className="text-gray-500 text-sm text-center py-6">
               Playlist vide — ajoute des pistes !
@@ -88,39 +104,55 @@ export default function PlaylistPanel({
           {playlist.map((track, i) => (
             <div
               key={track.id}
-              className={`flex items-center gap-2 px-2 py-2 rounded-lg group transition-colors ${
+              className={`rounded-lg group transition-colors ${
                 i === currentIndex ? 'bg-sky-900/40 border border-sky-700/40' : 'hover:bg-gray-700/50'
               }`}
             >
-              <span className="text-xs text-gray-500 w-5 text-center shrink-0">{i + 1}</span>
-              <span className="text-sm shrink-0" title={STATUS_LABEL[track.status]}>
-                {STATUS_ICON[track.status] || '?'}
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-white truncate font-medium">
-                  {track.metadata?.title || '—'}
-                </p>
-                <p className="text-xs text-gray-400 truncate">
-                  {track.metadata?.artist || (track.type === 'youtube' ? 'YouTube' : 'Local')}
-                  {track.metadata?.year ? ` · ${track.metadata.year}` : ''}
-                </p>
-              </div>
-              <div className="flex gap-1 shrink-0">
-                {track.status === 'ready' && (
+              <div className="flex items-center gap-2 px-2 py-2">
+                <span className="text-xs text-gray-500 w-5 text-center shrink-0">{i + 1}</span>
+                <span className="text-sm shrink-0" title={STATUS_LABEL[track.status]}>
+                  {STATUS_ICON[track.status] || '?'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-white truncate font-medium">
+                    {track.metadata?.title || '—'}
+                  </p>
+                  <p className="text-xs text-gray-400 truncate">
+                    {track.metadata?.artist || (track.type === 'youtube' ? 'YouTube' : 'Local')}
+                    {track.metadata?.year ? ` · ${track.metadata.year}` : ''}
+                  </p>
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  {track.status === 'ready' && (
+                    <button
+                      onClick={() => onPlay(i)}
+                      className="text-xs bg-sky-700 hover:bg-sky-600 text-white px-2 py-1 rounded transition-colors"
+                    >
+                      ▶
+                    </button>
+                  )}
+                  {track.status === 'error' && track.type === 'youtube' && (
+                    <button
+                      onClick={() => onRetry(i)}
+                      title="Réessayer le téléchargement"
+                      className="text-xs bg-amber-700 hover:bg-amber-600 text-white px-2 py-1 rounded transition-colors"
+                    >
+                      ↻
+                    </button>
+                  )}
                   <button
-                    onClick={() => onPlay(i)}
-                    className="text-xs bg-sky-700 hover:bg-sky-600 text-white px-2 py-1 rounded transition-colors"
+                    onClick={() => onRemove(i)}
+                    className="text-xs text-gray-500 hover:text-red-400 px-1 rounded transition-colors opacity-0 group-hover:opacity-100"
                   >
-                    ▶
+                    ✕
                   </button>
-                )}
-                <button
-                  onClick={() => onRemove(i)}
-                  className="text-xs text-gray-500 hover:text-red-400 px-1 rounded transition-colors opacity-0 group-hover:opacity-100"
-                >
-                  ✕
-                </button>
+                </div>
               </div>
+              {track.status === 'error' && track.error && (
+                <p className="text-xs text-red-400 px-2 pb-2 -mt-1 break-words">
+                  {track.error}
+                </p>
+              )}
             </div>
           ))}
         </div>

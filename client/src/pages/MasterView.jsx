@@ -264,6 +264,15 @@ export default function MasterView({ masterInfo, initialState }) {
     await cmd('master:remove-track', { index });
   }
 
+  async function handleRetry(index) {
+    const res = await cmd('master:retry-track', { index });
+    if (!res?.ok) notify(res?.error || 'Erreur');
+  }
+
+  async function handleShuffle() {
+    await cmd('master:shuffle');
+  }
+
   function handleSelectFile(filePath) {
     cmd('master:add-local', { filePath });
     setShowBrowser(false);
@@ -336,6 +345,8 @@ export default function MasterView({ masterInfo, initialState }) {
             onImportPlaylist={handleImportPlaylist}
             onOpenBrowser={() => setShowBrowser(true)}
             onRemove={handleRemove}
+            onRetry={handleRetry}
+            onShuffle={handleShuffle}
             onPlay={handlePlay}
           />
         </div>
@@ -349,7 +360,9 @@ export default function MasterView({ masterInfo, initialState }) {
             {currentMeta ? (
               <div className="text-center">
                 <p className="text-lg font-bold text-white">{currentMeta.title}</p>
-                <p className="text-sky-400 text-sm">{currentMeta.artist}</p>
+                {currentMeta.artist && (
+                  <p className="text-sky-400 text-sm">{currentMeta.artist}</p>
+                )}
                 {currentMeta.album && (
                   <p className="text-xs text-gray-400">
                     {currentMeta.album}{currentMeta.year ? ` · ${currentMeta.year}` : ''}

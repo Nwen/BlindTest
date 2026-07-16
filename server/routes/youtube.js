@@ -117,19 +117,6 @@ function ytDownload(url, trackId) {
   });
 }
 
-/**
- * Parse un titre YouTube pour en extraire artiste/titre.
- * Formats courants : "Artiste - Titre", "Artiste - Titre (Official Video)"
- */
-function parseYoutubeTitle(rawTitle) {
-  const clean = rawTitle
-    .replaceAll(/\s*[([](?:official|mv|music video|video|audio|lyrics|lyric|hd|4k)[^)\]]*[)\]]/gi, '')
-    .trim();
-  const m = clean.match(/^(.+?)\s*[-–—]\s*(.+)$/);
-  if (m) return { artist: m[1].trim(), title: m[2].trim() };
-  return { artist: '', title: clean };
-}
-
 // ─── Téléchargement en arrière-plan ──────────────────────────────────────────
 
 /**
@@ -149,6 +136,7 @@ async function downloadTrackForGame({ game, track, io, masterSocketId }) {
     const localPath = await ytDownload(track.youtubeUrl, track.id);
     track.status    = 'ready';
     track.localPath = localPath;
+    track.error     = null;
     console.log(`[${ts()}] ✔ ${label} — prêt (${path.basename(localPath)})`);
     io.to(masterSocketId).emit('playlist-updated', game.playlist);
     io.to(masterSocketId).emit('track-ready', { trackId: track.id });
@@ -178,13 +166,13 @@ module.exports = function youtubeRouter(io) {
     if (!url) return res.status(400).json({ error: 'URL manquante' });
     try {
       const info = await ytInfo(url);
-      const { artist, title } = parseYoutubeTitle(info.title || '');
       res.json({
         id:       info.id,
         title:    info.title,
         duration: info.duration,
         thumbnail: info.thumbnail,
-        parsed:   { artist, title, album: '', year: String(info.release_year || info.upload_date?.slice(0, 4) || '') },
+        // Pas d'extraction artiste/titre : le titre YouTube brut est souvent mal formaté.
+        parsed:   { artist: '', title: info.title || '', album: '', year: String(info.release_year || info.upload_date?.slice(0, 4) || '') },
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -247,6 +235,5 @@ module.exports = function youtubeRouter(io) {
 };
 
 module.exports.downloadTrackForGame = downloadTrackForGame;
-module.exports.parseYoutubeTitle   = parseYoutubeTitle;
 module.exports.ytPlaylist          = ytPlaylist;
 module.exports.ytInfo              = ytInfo;

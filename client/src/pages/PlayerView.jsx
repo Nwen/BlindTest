@@ -360,7 +360,9 @@ export default function PlayerView({ playerInfo, initialState }) {
           {results.metadata && (
             <div className="text-center pb-2 border-b border-gray-700">
               <p className="text-xl font-bold text-white">{results.metadata.title}</p>
-              <p className="text-sky-400">{results.metadata.artist}</p>
+              {results.metadata.artist && (
+                <p className="text-sky-400">{results.metadata.artist}</p>
+              )}
               {results.metadata.album && (
                 <p className="text-xs text-gray-400 mt-0.5">
                   {results.metadata.album}{results.metadata.year ? ` · ${results.metadata.year}` : ''}

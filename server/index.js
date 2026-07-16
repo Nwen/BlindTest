@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const GameManager = require('./GameManager');
 const mediaRouter  = require('./routes/media');
 const youtubeModule = require('./routes/youtube');
-const { downloadTrackForGame, parseYoutubeTitle, ytPlaylist, ytInfo } = youtubeModule;
+const { downloadTrackForGame, ytPlaylist, ytInfo } = youtubeModule;
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT || '/media';
 const PORT       = Number.parseInt(process.env.PORT || '3000', 10);
@@ -205,14 +205,15 @@ io.on('connection', (socket) => {
     cb?.({ ok: true, track });
 
     // Récupérer les métadonnées en arrière-plan
+    // Pas d'extraction artiste/titre pour YouTube : le titre brut de la vidéo est affiché tel quel.
     ytInfo(url)
       .then(data => {
-        const { artist, title } = parseYoutubeTitle(data.title || '');
+        const title = data.title || url;
         track.metadata = {
-          artist, title, album: '',
+          artist: '', title, album: '',
           year: String(data.release_year || data.upload_date?.slice(0, 4) || ''),
         };
-        log.info(`[${game.id}] Métadonnées YouTube : "${artist} — ${title}"`);
+        log.info(`[${game.id}] Métadonnées YouTube : "${title}"`);
         io.to(socket.id).emit('playlist-updated', game.playlist);
       })
       .catch(err => log.warn(`[${game.id}] ytInfo échoué pour ${url} :`, err.message));
@@ -234,7 +235,7 @@ io.on('connection', (socket) => {
         id:         uuidv4(),
         type:       'youtube',
         youtubeUrl: e.url || `https://www.youtube.com/watch?v=${e.id}`,
-        metadata:   { ...parseYoutubeTitle(e.title || ''), album: '', year: '' },
+        metadata:   { artist: '', title: e.title || '', album: '', year: '' },
         status:     'pending',
         localPath:  null,
       }));
@@ -251,6 +252,25 @@ io.on('connection', (socket) => {
       log.error(`[${game.id}] master:import-playlist :`, err.message);
       cb?.({ ok: false, error: err.message });
     }
+  });
+
+  // ── Relancer le téléchargement d'une piste YouTube en erreur ───────────────
+  socket.on('master:retry-track', ({ token, index } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    const track = game.playlist[index];
+    if (!track) return cb?.({ ok: false, error: 'Piste introuvable' });
+    if (track.type !== 'youtube') return cb?.({ ok: false, error: 'Seules les pistes YouTube peuvent être retéléchargées' });
+
+    track.status = 'pending';
+    track.error  = null;
+    log.info(`[${game.id}] Nouvelle tentative de téléchargement [${index}] : ${track.youtubeUrl}`);
+    io.to(socket.id).emit('playlist-updated', game.playlist);
+    cb?.({ ok: true });
+
+    downloadTrackForGame({ game, track, io, masterSocketId: socket.id })
+      .catch(err => log.error(`[${game.id}] Nouvelle tentative de téléchargement échouée :`, err.message));
   });
 
   // ── Supprimer une piste ────────────────────────────────────────────────────
@@ -273,6 +293,27 @@ io.on('connection', (socket) => {
     if (!game) return cb?.({ ok: false });
     const [item] = game.playlist.splice(from, 1);
     game.playlist.splice(to, 0, item);
+    io.to(socket.id).emit('playlist-updated', game.playlist);
+    cb?.({ ok: true });
+  });
+
+  // ── Mélanger l'ordre de la playlist ─────────────────────────────────────────
+  socket.on('master:shuffle', ({ token } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    const currentTrack = game.playlist[game.currentTrackIndex] || null;
+
+    // Fisher-Yates
+    for (let i = game.playlist.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [game.playlist[i], game.playlist[j]] = [game.playlist[j], game.playlist[i]];
+    }
+
+    // Garder l'index à jour si une piste est en cours de lecture
+    if (currentTrack) game.currentTrackIndex = game.playlist.indexOf(currentTrack);
+
+    log.info(`[${game.id}] Playlist mélangée (${game.playlist.length} piste(s))`);
     io.to(socket.id).emit('playlist-updated', game.playlist);
     cb?.({ ok: true });
   });
