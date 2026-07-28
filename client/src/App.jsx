@@ -3,6 +3,7 @@ import socket from './socket.js';
 import Home       from './pages/Home.jsx';
 import MasterView from './pages/MasterView.jsx';
 import PlayerView from './pages/PlayerView.jsx';
+import pkg from '../package.json';
 
 // Persistance locale du rôle maître (pour les refreshs)
 const LS_MASTER = 'blindtest_master';
@@ -114,6 +115,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-900">
+      <span className="fixed bottom-1 right-2 text-[10px] text-gray-600 select-none z-50">
+        v{pkg.version}
+      </span>
       {view === 'home' && (
         <Home
           onCreateGame={handleCreateGame}

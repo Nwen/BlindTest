@@ -27,12 +27,24 @@ export default function PlayerView({ playerInfo, initialState }) {
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [answerers,    setAnswerers]    = useState(new Set());
   const [gameOver,     setGameOver]     = useState(false);
+  const [paused,       setPaused]       = useState(initialState?.paused       ?? false);
   const audioRef = useRef(null);
 
   const myId   = socket.id;
   const me     = players.find(p => p.id === myId);
   const myTeam = me?.teamId ? teams.find(t => t.id === me.teamId) : null;
   const myBuzz = buzzOrder.find(b => b.playerId === myId);
+
+  // Reflète toujours les dernières valeurs, pour l'auto-envoi dans le listener 'track-stopped'
+  // (enregistré une seule fois au montage, donc sans accès direct aux states à jour).
+  const modeRef      = useRef(mode);
+  const artistRef    = useRef(artist);
+  const titleRef     = useRef(title);
+  const submittedRef = useRef(submitted);
+  modeRef.current      = mode;
+  artistRef.current    = artist;
+  titleRef.current     = title;
+  submittedRef.current = submitted;
 
   // ── Neutraliser les contrôles média OS/matériels (touches clavier, casque…) ──
   // Seul le maître du jeu pilote la lecture ; on empêche les joueurs de la couper.
@@ -66,6 +78,7 @@ export default function PlayerView({ playerInfo, initialState }) {
       setBuzzOrder([]);
       setAnswerers(new Set());
       setResults(null);
+      setPaused(false);
       // Lancer l'audio
       if (audioRef.current) {
         audioRef.current.src = url;
@@ -78,10 +91,33 @@ export default function PlayerView({ playerInfo, initialState }) {
 
     function onTrackStopped() {
       setPhase('stopped');
+      setPaused(false);
+      // Envoyer automatiquement ce qui est saisi mais pas encore validé, pour ne pas perdre la réponse.
+      if (modeRef.current === 'text' && !submittedRef.current) {
+        const a = artistRef.current;
+        const t = titleRef.current;
+        if (a.trim() || t.trim()) {
+          socket.emit('submit-answer', { artist: a, title: t });
+        }
+        setSubmitted(true);
+      }
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.currentTime = 0;
       }
+    }
+
+    // Un joueur a buzzé : couper le son le temps que le maître juge la réponse
+    function onTrackPaused() {
+      setPaused(true);
+      audioRef.current?.pause();
+    }
+
+    function onTrackResumed() {
+      setPaused(false);
+      audioRef.current?.play()
+        .then(() => setAudioBlocked(false))
+        .catch(() => setAudioBlocked(true));
     }
 
     function onSomeoneAnswered({ playerId }) {
@@ -108,6 +144,7 @@ export default function PlayerView({ playerInfo, initialState }) {
       setResults(null);
       setAnswerers(new Set());
       setAudioUrl('');
+      setPaused(false);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.src = '';
@@ -126,6 +163,7 @@ export default function PlayerView({ playerInfo, initialState }) {
       setPlayers(s.players);
       setTeams(s.teams || []);
       if (s.masterOnline !== undefined) setMasterOnline(s.masterOnline);
+      if (s.paused !== undefined) setPaused(s.paused);
     }
 
     function onMasterOffline() { setMasterOnline(false); }
@@ -136,6 +174,8 @@ export default function PlayerView({ playerInfo, initialState }) {
     socket.on('player-left',      onPlayerLeft);
     socket.on('track-playing',    onTrackPlaying);
     socket.on('track-stopped',    onTrackStopped);
+    socket.on('track-paused',     onTrackPaused);
+    socket.on('track-resumed',    onTrackResumed);
     socket.on('someone-answered', onSomeoneAnswered);
     socket.on('buzz-update',      onBuzzUpdate);
     socket.on('results-revealed', onResultsRevealed);
@@ -150,6 +190,8 @@ export default function PlayerView({ playerInfo, initialState }) {
       socket.off('player-left',      onPlayerLeft);
       socket.off('track-playing',    onTrackPlaying);
       socket.off('track-stopped',    onTrackStopped);
+      socket.off('track-paused',     onTrackPaused);
+      socket.off('track-resumed',    onTrackResumed);
       socket.off('someone-answered', onSomeoneAnswered);
       socket.off('buzz-update',      onBuzzUpdate);
       socket.off('results-revealed', onResultsRevealed);
@@ -232,6 +274,10 @@ export default function PlayerView({ playerInfo, initialState }) {
             >
               🔊 Activer le son
             </button>
+          ) : paused ? (
+            <span className="flex items-center gap-2 text-yellow-300 text-sm">
+              <span className="w-2 h-2 rounded-full bg-yellow-400" /> En pause — quelqu'un a buzzé…
+            </span>
           ) : (
             <span className="flex items-center gap-2 text-green-300 text-sm">
               <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" /> Lecture en cours…
@@ -290,7 +336,8 @@ export default function PlayerView({ playerInfo, initialState }) {
               </div>
               <button
                 onClick={handleEdit}
-                className="text-xs text-gray-400 hover:text-white underline"
+                className="w-full bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2
+                           rounded-lg transition-colors text-sm"
               >
                 Modifier ma réponse
               </button>
@@ -469,6 +516,7 @@ PlayerView.propTypes = {
     players:      PropTypes.array,
     teams:        PropTypes.array,
     masterOnline: PropTypes.bool,
+    paused:       PropTypes.bool,
   }),
 };
 

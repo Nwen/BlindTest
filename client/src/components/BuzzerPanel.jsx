@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import PropTypes from 'prop-types';
 import { teamColorClasses } from '../teamColors.js';
 
@@ -21,16 +20,8 @@ ReactionTime.defaultProps = { ms: null };
  * buzzOrder : classement en direct (pendant 'playing')
  * teams   : [{ id, name, color }]
  */
-export default function BuzzerPanel({ live, rows, buzzOrder, teams, onAward, onAwardTeam }) {
-  const [pointsByPlayer, setPointsByPlayer] = useState({});
+export default function BuzzerPanel({ live, rows, buzzOrder, teams, onAward }) {
   const teamById = new Map(teams.map(t => [t.id, t]));
-
-  function pointsFor(playerId) {
-    return pointsByPlayer[playerId] ?? 1;
-  }
-  function setPoints(playerId, value) {
-    setPointsByPlayer(prev => ({ ...prev, [playerId]: value }));
-  }
 
   if (live) {
     return (
@@ -88,33 +79,21 @@ export default function BuzzerPanel({ live, rows, buzzOrder, teams, onAward, onA
                   </div>
                 </div>
 
-                <div className="ml-auto flex items-center gap-2">
+                <div className="ml-auto flex flex-col items-end gap-1">
                   {r.awardedPoints > 0 && (
                     <span className="text-xs text-yellow-400 font-bold">+{r.awardedPoints} attribué{r.awardedPoints > 1 ? 's' : ''}</span>
                   )}
-                  <input
-                    type="number"
-                    min={0}
-                    value={pointsFor(r.playerId)}
-                    onChange={e => setPoints(r.playerId, Number(e.target.value))}
-                    className="w-14 bg-gray-600 border border-gray-500 rounded-md px-2 py-1 text-sm text-white
-                               focus:outline-none focus:border-sky-500"
-                  />
-                  <button
-                    onClick={() => onAward(r.playerId, pointsFor(r.playerId))}
-                    className="bg-green-700 hover:bg-green-600 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors"
-                  >
-                    Attribuer
-                  </button>
-                  {team && (
-                    <button
-                      onClick={() => onAwardTeam(team.id, pointsFor(r.playerId))}
-                      className="bg-violet-700 hover:bg-violet-600 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors"
-                      title={`Donner ces points à toute l'équipe ${team.name}`}
-                    >
-                      → équipe
-                    </button>
-                  )}
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3].map(n => (
+                      <button
+                        key={n}
+                        onClick={() => onAward(r.playerId, n)}
+                        className="bg-green-700 hover:bg-green-600 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors"
+                      >
+                        +{n}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             );
@@ -131,7 +110,6 @@ BuzzerPanel.propTypes = {
   buzzOrder:   PropTypes.array,
   teams:       PropTypes.array,
   onAward:     PropTypes.func.isRequired,
-  onAwardTeam: PropTypes.func.isRequired,
 };
 
 BuzzerPanel.defaultProps = {

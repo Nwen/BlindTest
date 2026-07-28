@@ -31,6 +31,7 @@ export default function MasterView({ masterInfo, initialState }) {
   const [copied,         setCopied]       = useState(false);
   const [gameOver,       setGameOver]     = useState(false);
   const [notification,   setNotification] = useState('');
+  const [paused,         setPaused]       = useState(initialState?.paused ?? false);
   const audioRef = useRef(null);
 
   // ── Events socket ──────────────────────────────────────────────────────────
@@ -41,6 +42,7 @@ export default function MasterView({ masterInfo, initialState }) {
       setPlayers(s.players);
       setTeams(s.teams || []);
       setCurrentIndex(s.currentTrackIndex);
+      if (s.paused !== undefined) setPaused(s.paused);
     }
 
     function onPlayerJoined(p) {
@@ -69,6 +71,7 @@ export default function MasterView({ masterInfo, initialState }) {
       setAnswers({});
       setRoundAwards({});
       setBuzzOrder([]);
+      setPaused(false);
       if (audioRef.current) {
         audioRef.current.src = url;
         audioRef.current.load();
@@ -82,10 +85,22 @@ export default function MasterView({ masterInfo, initialState }) {
 
     function onTrackStopped() {
       setPhase('stopped');
+      setPaused(false);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.currentTime = 0;
       }
+    }
+
+    // Un joueur a buzzé : couper le son pour tout le monde le temps de juger la réponse
+    function onTrackPaused() {
+      setPaused(true);
+      audioRef.current?.pause();
+    }
+
+    function onTrackResumed() {
+      setPaused(false);
+      audioRef.current?.play().catch(() => {});
     }
 
     function onPlayerAnswered({ playerId, playerName, answer }) {
@@ -121,6 +136,7 @@ export default function MasterView({ masterInfo, initialState }) {
       setRoundAwards({});
       setBuzzOrder([]);
       setAudioUrl('');
+      setPaused(false);
       if (audioRef.current) {
         audioRef.current.src = '';
         audioRef.current.pause();
@@ -141,6 +157,8 @@ export default function MasterView({ masterInfo, initialState }) {
     socket.on('track-playing',     onTrackPlaying);
     socket.on('track-meta',        onTrackMeta);
     socket.on('track-stopped',     onTrackStopped);
+    socket.on('track-paused',      onTrackPaused);
+    socket.on('track-resumed',     onTrackResumed);
     socket.on('player-answered',   onPlayerAnswered);
     socket.on('answers-snapshot',  onAnswersSnapshot);
     socket.on('results-update',    onResultsUpdate);
@@ -158,6 +176,8 @@ export default function MasterView({ masterInfo, initialState }) {
       socket.off('track-playing',     onTrackPlaying);
       socket.off('track-meta',        onTrackMeta);
       socket.off('track-stopped',     onTrackStopped);
+      socket.off('track-paused',      onTrackPaused);
+      socket.off('track-resumed',     onTrackResumed);
       socket.off('player-answered',   onPlayerAnswered);
       socket.off('answers-snapshot',  onAnswersSnapshot);
       socket.off('results-update',    onResultsUpdate);
@@ -204,6 +224,11 @@ export default function MasterView({ masterInfo, initialState }) {
     await cmd('master:replay');
   }
 
+  async function handleResume() {
+    const res = await cmd('master:resume');
+    if (!res?.ok) notify(res?.error || 'Erreur');
+  }
+
   async function handleReveal() {
     await cmd('master:reveal');
   }
@@ -223,11 +248,6 @@ export default function MasterView({ masterInfo, initialState }) {
 
   async function handleBuzzerAward(playerId, points) {
     const res = await cmd('master:buzzer-award', { playerId, points });
-    if (!res?.ok) notify(res?.error || 'Erreur');
-  }
-
-  async function handleBuzzerAwardTeam(teamId, points) {
-    const res = await cmd('master:buzzer-award', { teamId, points });
     if (!res?.ok) notify(res?.error || 'Erreur');
   }
 
@@ -262,6 +282,11 @@ export default function MasterView({ masterInfo, initialState }) {
 
   async function handleRemove(index) {
     await cmd('master:remove-track', { index });
+  }
+
+  async function handleAdjustScore(playerId, delta) {
+    const res = await cmd('master:adjust-score', { playerId, delta });
+    if (!res?.ok) notify(res?.error || 'Erreur');
   }
 
   async function handleRetry(index) {
@@ -375,18 +400,32 @@ export default function MasterView({ masterInfo, initialState }) {
               </p>
             )}
 
+            {phase === 'playing' && paused && (
+              <div className="bg-yellow-900/40 border border-yellow-700/50 rounded-xl px-4 py-3
+                              flex items-center justify-between gap-3 flex-wrap">
+                <span className="text-yellow-300 text-sm font-medium">⏸ En pause — un joueur a buzzé</span>
+                <button
+                  onClick={handleResume}
+                  className="bg-yellow-600 hover:bg-yellow-500 text-white font-semibold px-4 py-2
+                             rounded-lg text-sm transition-colors"
+                >
+                  ▶ Reprendre
+                </button>
+              </div>
+            )}
+
             <audio ref={audioRef} controls className="w-full rounded-lg accent-sky-500" />
 
             {/* Boutons de contrôle */}
             <div className="flex flex-wrap gap-2 justify-center">
-              {phase !== 'playing' && currentIndex >= 0 && (
+              {phase !== 'playing' && playlist.length > 0 && (
                 <button
-                  onClick={() => handlePlay(currentIndex)}
-                  disabled={playlist[currentIndex]?.status !== 'ready'}
+                  onClick={() => handlePlay(currentIndex < 0 ? 0 : currentIndex)}
+                  disabled={playlist[currentIndex < 0 ? 0 : currentIndex]?.status !== 'ready'}
                   className="flex-1 min-w-[120px] bg-green-700 hover:bg-green-600 disabled:bg-gray-600
                              text-white font-semibold py-2 px-4 rounded-lg transition-colors text-sm"
                 >
-                  ▶ Lancer
+                  {currentIndex < 0 ? '▶ Démarrer' : '▶ Lancer'}
                 </button>
               )}
               {phase === 'playing' && (
@@ -436,27 +475,17 @@ export default function MasterView({ masterInfo, initialState }) {
                   )}
                 </>
               )}
-              {phase === 'lobby' && playlist.length > 0 && (
-                <button
-                  onClick={() => handlePlay(currentIndex < 0 ? 0 : currentIndex)}
-                  disabled={playlist[currentIndex < 0 ? 0 : currentIndex]?.status !== 'ready'}
-                  className="flex-1 min-w-[120px] bg-green-700 hover:bg-green-600 disabled:bg-gray-600
-                             text-white font-semibold py-2 px-4 rounded-lg transition-colors text-sm"
-                >
-                  ▶ Démarrer
-                </button>
-              )}
             </div>
           </div>
 
           {/* Buzzers en direct (mode 'buzzer', pendant la lecture) */}
           {mode === 'buzzer' && phase === 'playing' && (
-            <BuzzerPanel live buzzOrder={buzzOrder} teams={teams} onAward={handleBuzzerAward} onAwardTeam={handleBuzzerAwardTeam} />
+            <BuzzerPanel live buzzOrder={buzzOrder} teams={teams} onAward={handleBuzzerAward} />
           )}
 
           {/* Attribution des points (mode 'buzzer', phase stopped ou results) */}
           {mode === 'buzzer' && (phase === 'stopped' || phase === 'results') && results.length > 0 && (
-            <BuzzerPanel rows={results} teams={teams} onAward={handleBuzzerAward} onAwardTeam={handleBuzzerAwardTeam} />
+            <BuzzerPanel rows={results} teams={teams} onAward={handleBuzzerAward} />
           )}
 
           {/* Réponses des joueurs (mode 'text', phase stopped ou results) */}
@@ -561,7 +590,7 @@ export default function MasterView({ masterInfo, initialState }) {
                 En attente de joueurs… (code : <strong className="font-mono text-white">{roomCode}</strong>)
               </p>
             ) : (
-              <Scoreboard players={players} teams={teams} />
+              <Scoreboard players={players} teams={teams} onAdjust={handleAdjustScore} />
             )}
           </div>
 

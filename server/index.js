@@ -154,6 +154,13 @@ io.on('connection', (socket) => {
     log.event(`[${game.id}] Buzz #${entry.order} : "${player?.name}" (${entry.reactionMs ?? '?'}ms)`);
 
     io.to(game.id).emit('buzz-update', { buzzOrder });
+
+    // Couper la musique pour tout le monde le temps que le maître juge la réponse
+    if (!game.paused) {
+      game.paused = true;
+      log.info(`[${game.id}] ⏸ Pause automatique (buzz de "${player?.name}")`);
+      io.to(game.id).emit('track-paused');
+    }
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -345,12 +352,25 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
   });
 
+  // ── Reprendre la musique après une pause déclenchée par un buzz ────────────
+  socket.on('master:resume', ({ token } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+    if (!game.paused) return cb?.({ ok: true });
+
+    game.paused = false;
+    log.info(`[${game.id}] ▶ Reprise de la musique après buzz`);
+    io.to(game.id).emit('track-resumed');
+    cb?.({ ok: true });
+  });
+
   // ── Stopper la musique ────────────────────────────────────────────────────
   socket.on('master:stop', ({ token } = {}, cb) => {
     const game = asMaster(socket, token);
     if (!game) return cb?.({ ok: false });
 
-    game.phase = 'stopped';
+    game.phase  = 'stopped';
+    game.paused = false;
     const answersCount = game.answers.size;
     log.info(`[${game.id}] ⏹ Stop — ${answersCount}/${game.players.size} réponse(s)`);
 
@@ -362,6 +382,24 @@ io.on('connection', (socket) => {
     });
     broadcastPlayerState(game);
     cb?.({ ok: true });
+  });
+
+  // ── Ajuster manuellement le score total d'un joueur ────────────────────────
+  socket.on('master:adjust-score', ({ token, playerId, delta } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false });
+
+    try {
+      game.adjustScore(playerId, delta);
+      const playerName = game.players.get(playerId)?.name || playerId;
+      log.event(`[${game.id}] Score ajusté (${delta > 0 ? '+' : ''}${delta}) : "${playerName}"`);
+
+      broadcastPlayerState(game);
+      io.to(socket.id).emit('results-update', game.getRoundResults());
+      cb?.({ ok: true });
+    } catch (err) {
+      cb?.({ ok: false, error: err.message });
+    }
   });
 
   // ── Attribuer / retirer un point (maître, mode 'text') ────────────────────
@@ -508,7 +546,8 @@ io.on('connection', (socket) => {
       ? `/api/media/stream?path=${encodeURIComponent(track.filePath)}`
       : `/api/youtube/stream/${track.id}`;
 
-    game.phase = 'playing';
+    game.phase  = 'playing';
+    game.paused = false;
     log.info(`[${game.id}] ↺ Replay : "${track.metadata.artist} — ${track.metadata.title}"`);
     io.to(game.id).emit('track-playing', { audioUrl, index: game.currentTrackIndex });
     io.to(socket.id).emit('track-meta', track.metadata);

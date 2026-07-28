@@ -64,6 +64,9 @@ class Game {
     // Horodatage du lancement de la piste courante (référence pour le temps de réaction)
     this.trackStartedAt = null;
 
+    // Mode 'buzzer' : musique en pause suite à un buzz, en attente que le maître reprenne
+    this.paused = false;
+
     // Mode 'text'  : socketId → { artist: bool, title: bool }
     // Mode 'buzzer': socketId → nombre de points attribués ce round
     // — attribués par le maître
@@ -141,6 +144,7 @@ class Game {
     this.roundAwards.clear();
     this.buzzes.clear();
     this.trackStartedAt = null;
+    this.paused = false;
   }
 
   submitAnswer(socketId, { artist, title }) {
@@ -234,6 +238,13 @@ class Game {
     return 0;
   }
 
+  /** Ajuste manuellement le score total d'un joueur (indépendamment du round en cours). */
+  adjustScore(playerId, delta) {
+    const player = this.players.get(playerId);
+    if (!player) throw new Error('Joueur introuvable');
+    player.score = Math.max(0, player.score + (Number(delta) || 0));
+  }
+
   /** Valide les points du round en cours et les ajoute au score total. */
   commitRound() {
     for (const [socketId, player] of this.players) {
@@ -298,6 +309,7 @@ class Game {
       teams:             this.getTeamList(),
       currentTrackIndex: this.currentTrackIndex,
       playlistLength:    this.playlist.length,
+      paused:            this.paused,
     };
   }
 
@@ -315,6 +327,7 @@ class Game {
       answers:           Object.fromEntries(this.answers),
       roundAwards:       Object.fromEntries(this.roundAwards),
       buzzOrder:         this.getLiveBuzzOrder(),
+      paused:            this.paused,
     };
   }
 }

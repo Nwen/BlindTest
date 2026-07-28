@@ -3,11 +3,12 @@ import { teamColorClasses } from '../teamColors.js';
 /**
  * Classement affiché pour les joueurs et dans les résultats.
  *
- * players : [{ id, name, score, teamId }]
- * teams   : [{ id, name, color, score }]  — optionnel, pour afficher les badges/totaux d'équipe
- * myId    : socketId du joueur courant (pour le mettre en évidence)
+ * players   : [{ id, name, score, teamId }]
+ * teams     : [{ id, name, color, score }]  — optionnel, pour afficher les badges/totaux d'équipe
+ * myId      : socketId du joueur courant (pour le mettre en évidence)
+ * onAdjust(playerId, delta) — optionnel : si fourni, affiche des boutons -/+ pour corriger le score (vue maître)
  */
-export default function Scoreboard({ players = [], teams = [], myId }) {
+export default function Scoreboard({ players = [], teams = [], myId, onAdjust }) {
   const sorted = [...players].sort((a, b) => b.score - a.score);
   const teamById = new Map(teams.map(t => [t.id, t]));
 
@@ -52,7 +53,26 @@ export default function Scoreboard({ players = [], teams = [], myId }) {
                 {p.name}
                 {p.id === myId && <span className="ml-1 text-sky-400 text-xs">(moi)</span>}
               </span>
+              {onAdjust && (
+                <button
+                  onClick={() => onAdjust(p.id, -1)}
+                  disabled={p.score <= 0}
+                  className="shrink-0 w-6 h-6 rounded-full bg-gray-600 hover:bg-red-700 disabled:opacity-30
+                             disabled:cursor-not-allowed text-white text-xs font-bold transition-colors"
+                >
+                  −
+                </button>
+              )}
               <span className="font-bold text-white tabular-nums">{p.score} pt{p.score !== 1 ? 's' : ''}</span>
+              {onAdjust && (
+                <button
+                  onClick={() => onAdjust(p.id, 1)}
+                  className="shrink-0 w-6 h-6 rounded-full bg-gray-600 hover:bg-green-700 text-white
+                             text-xs font-bold transition-colors"
+                >
+                  +
+                </button>
+              )}
             </li>
           );
         })}
