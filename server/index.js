@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const GameManager = require('./GameManager');
 const mediaRouter  = require('./routes/media');
 const youtubeModule = require('./routes/youtube');
-const { downloadTrackForGame, ytPlaylist, ytInfo, buildYoutubeMetadata, cleanChannelName } = youtubeModule;
+const { downloadTrackForGame, ytPlaylist, ytInfoPreferMusic, buildYoutubeMetadata, cleanChannelName } = youtubeModule;
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT || '/media';
 const PORT       = Number.parseInt(process.env.PORT || '3000', 10);
@@ -211,8 +211,9 @@ io.on('connection', (socket) => {
     io.to(socket.id).emit('playlist-updated', game.playlist);
     cb?.({ ok: true, track });
 
-    // Récupérer les métadonnées en arrière-plan (artiste/chaîne si détectés par yt-dlp)
-    ytInfo(url)
+    // Récupérer les métadonnées en arrière-plan : YouTube Music d'abord (artiste/album
+    // mieux renseignés), repli sur YouTube classique si indisponible (voir ytInfoPreferMusic).
+    ytInfoPreferMusic(url)
       .then(data => {
         track.metadata = buildYoutubeMetadata(data);
         log.info(`[${game.id}] Métadonnées YouTube : "${track.metadata.title}" (chaîne : ${track.metadata.channel || '?'})`);
@@ -249,7 +250,7 @@ io.on('connection', (socket) => {
       cb?.({ ok: true, count: newTracks.length });
 
       for (const track of newTracks) {
-        ytInfo(track.youtubeUrl)
+        ytInfoPreferMusic(track.youtubeUrl)
           .then(data => {
             track.metadata = buildYoutubeMetadata(data);
             io.to(socket.id).emit('playlist-updated', game.playlist);

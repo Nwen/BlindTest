@@ -62,6 +62,37 @@ function ytInfo(url) {
   });
 }
 
+/** Extrait l'ID vidéo d'une URL YouTube (watch, youtu.be, shorts, music.youtube.com). */
+function extractVideoId(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'youtu.be') return u.pathname.slice(1).split('/')[0] || null;
+    const vParam = u.searchParams.get('v');
+    if (vParam) return vParam;
+    const shortsMatch = /\/shorts\/([\w-]+)/.exec(u.pathname);
+    return shortsMatch ? shortsMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Récupère les métadonnées d'une vidéo en interrogeant d'abord YouTube Music
+ * (titre/artiste/album généralement mieux renseignés pour les morceaux), puis
+ * retombe sur l'extraction YouTube classique si l'appel échoue.
+ */
+async function ytInfoPreferMusic(url) {
+  const videoId  = extractVideoId(url);
+  const musicUrl = videoId ? `https://music.youtube.com/watch?v=${videoId}` : null;
+
+  if (musicUrl) {
+    try {
+      return await ytInfo(musicUrl);
+    } catch { /* Pas de métadonnées YouTube Music pour cette vidéo : retour au YouTube classique. */ }
+  }
+  return ytInfo(url);
+}
+
 /** Récupère les entrées d'une playlist YouTube (format flat). */
 function ytPlaylist(url) {
   return new Promise((resolve, reject) => {
@@ -135,7 +166,7 @@ function buildYoutubeMetadata(info) {
     artist:  (info.artist || '').trim(),
     title:   (info.track || info.title || '').trim(),
     channel: cleanChannelName(info.channel || info.uploader || ''),
-    album:   '',
+    album:   (info.album || '').trim(),
     year:    String(info.release_year || info.upload_date?.slice(0, 4) || ''),
   };
 }
@@ -188,7 +219,7 @@ module.exports = function youtubeRouter(io) {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL manquante' });
     try {
-      const info = await ytInfo(url);
+      const info = await ytInfoPreferMusic(url);
       res.json({
         id:        info.id,
         title:     info.title,
@@ -259,5 +290,6 @@ module.exports = function youtubeRouter(io) {
 module.exports.downloadTrackForGame  = downloadTrackForGame;
 module.exports.ytPlaylist            = ytPlaylist;
 module.exports.ytInfo                = ytInfo;
+module.exports.ytInfoPreferMusic     = ytInfoPreferMusic;
 module.exports.buildYoutubeMetadata  = buildYoutubeMetadata;
 module.exports.cleanChannelName      = cleanChannelName;
