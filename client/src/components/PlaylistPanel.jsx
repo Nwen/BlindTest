@@ -118,7 +118,9 @@ export default function PlaylistPanel({
                     {track.metadata?.title || '—'}
                   </p>
                   <p className="text-xs text-gray-400 truncate">
-                    {track.metadata?.artist || (track.type === 'youtube' ? 'YouTube' : 'Local')}
+                    {track.type === 'youtube'
+                      ? `YT: ${track.metadata?.channel || '?'}`
+                      : (track.metadata?.artist || 'Local')}
                     {track.metadata?.year ? ` · ${track.metadata.year}` : ''}
                   </p>
                 </div>

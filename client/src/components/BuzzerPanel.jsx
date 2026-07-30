@@ -35,7 +35,7 @@ export default function BuzzerPanel({ live, rows, buzzOrder, teams, onAward }) {
               const team = b.teamId ? teamById.get(b.teamId) : null;
               const c    = team ? teamColorClasses(team.color) : null;
               return (
-                <li key={b.playerId} className="flex items-center gap-2 bg-gray-700/50 rounded-lg px-3 py-1.5 text-sm">
+                <li key={b.order} className="flex items-center gap-2 bg-gray-700/50 rounded-lg px-3 py-1.5 text-sm">
                   <span className="w-6 text-center shrink-0">{MEDALS[b.order - 1] || `#${b.order}`}</span>
                   {team && <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${c.badge}`}>{team.name}</span>}
                   <span className="flex-1 truncate font-medium text-white">{b.playerName}</span>

@@ -117,6 +117,29 @@ function ytDownload(url, trackId) {
   });
 }
 
+// ─── Métadonnées ──────────────────────────────────────────────────────────────
+
+/** Retire le suffixe " - Topic" des chaînes auto-générées par YouTube pour les titres musicaux. */
+function cleanChannelName(name) {
+  return (name || '').trim().replace(/ - Topic$/i, '').trim();
+}
+
+/**
+ * Construit les métadonnées d'une piste à partir d'un objet yt-dlp (--dump-json).
+ * `artist`/`track` ne sont renseignés par yt-dlp que pour les vidéos reconnues comme
+ * musicales (chaînes "Artiste - Topic", Content ID musical…) : on les utilise quand ils
+ * existent, sinon on retombe sur le titre brut de la vidéo sans essayer de le découper.
+ */
+function buildYoutubeMetadata(info) {
+  return {
+    artist:  (info.artist || '').trim(),
+    title:   (info.track || info.title || '').trim(),
+    channel: cleanChannelName(info.channel || info.uploader || ''),
+    album:   '',
+    year:    String(info.release_year || info.upload_date?.slice(0, 4) || ''),
+  };
+}
+
 // ─── Téléchargement en arrière-plan ──────────────────────────────────────────
 
 /**
@@ -167,12 +190,11 @@ module.exports = function youtubeRouter(io) {
     try {
       const info = await ytInfo(url);
       res.json({
-        id:       info.id,
-        title:    info.title,
-        duration: info.duration,
+        id:        info.id,
+        title:     info.title,
+        duration:  info.duration,
         thumbnail: info.thumbnail,
-        // Pas d'extraction artiste/titre : le titre YouTube brut est souvent mal formaté.
-        parsed:   { artist: '', title: info.title || '', album: '', year: String(info.release_year || info.upload_date?.slice(0, 4) || '') },
+        parsed:    buildYoutubeMetadata(info),
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -234,6 +256,8 @@ module.exports = function youtubeRouter(io) {
   return router;
 };
 
-module.exports.downloadTrackForGame = downloadTrackForGame;
-module.exports.ytPlaylist          = ytPlaylist;
-module.exports.ytInfo              = ytInfo;
+module.exports.downloadTrackForGame  = downloadTrackForGame;
+module.exports.ytPlaylist            = ytPlaylist;
+module.exports.ytInfo                = ytInfo;
+module.exports.buildYoutubeMetadata  = buildYoutubeMetadata;
+module.exports.cleanChannelName      = cleanChannelName;

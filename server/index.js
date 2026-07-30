@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const GameManager = require('./GameManager');
 const mediaRouter  = require('./routes/media');
 const youtubeModule = require('./routes/youtube');
-const { downloadTrackForGame, ytPlaylist, ytInfo } = youtubeModule;
+const { downloadTrackForGame, ytPlaylist, ytInfo, buildYoutubeMetadata, cleanChannelName } = youtubeModule;
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT || '/media';
 const PORT       = Number.parseInt(process.env.PORT || '3000', 10);
@@ -202,7 +202,7 @@ io.on('connection', (socket) => {
       id:         uuidv4(),
       type:       'youtube',
       youtubeUrl: url,
-      metadata:   { artist: '', title: url, album: '', year: '' },
+      metadata:   { artist: '', title: url, channel: '', album: '', year: '' },
       status:     'pending',
       localPath:  null,
     };
@@ -211,16 +211,11 @@ io.on('connection', (socket) => {
     io.to(socket.id).emit('playlist-updated', game.playlist);
     cb?.({ ok: true, track });
 
-    // Récupérer les métadonnées en arrière-plan
-    // Pas d'extraction artiste/titre pour YouTube : le titre brut de la vidéo est affiché tel quel.
+    // Récupérer les métadonnées en arrière-plan (artiste/chaîne si détectés par yt-dlp)
     ytInfo(url)
       .then(data => {
-        const title = data.title || url;
-        track.metadata = {
-          artist: '', title, album: '',
-          year: String(data.release_year || data.upload_date?.slice(0, 4) || ''),
-        };
-        log.info(`[${game.id}] Métadonnées YouTube : "${title}"`);
+        track.metadata = buildYoutubeMetadata(data);
+        log.info(`[${game.id}] Métadonnées YouTube : "${track.metadata.title}" (chaîne : ${track.metadata.channel || '?'})`);
         io.to(socket.id).emit('playlist-updated', game.playlist);
       })
       .catch(err => log.warn(`[${game.id}] ytInfo échoué pour ${url} :`, err.message));
@@ -242,7 +237,9 @@ io.on('connection', (socket) => {
         id:         uuidv4(),
         type:       'youtube',
         youtubeUrl: e.url || `https://www.youtube.com/watch?v=${e.id}`,
-        metadata:   { artist: '', title: e.title || '', album: '', year: '' },
+        // Le format --flat-playlist ne fournit pas artist/track (extraction complète requise) ;
+        // on affiche déjà la chaîne, affinée en arrière-plan via ytInfo ci-dessous.
+        metadata:   { artist: '', title: e.title || '', channel: cleanChannelName(e.channel || e.uploader || ''), album: '', year: '' },
         status:     'pending',
         localPath:  null,
       }));
@@ -252,6 +249,13 @@ io.on('connection', (socket) => {
       cb?.({ ok: true, count: newTracks.length });
 
       for (const track of newTracks) {
+        ytInfo(track.youtubeUrl)
+          .then(data => {
+            track.metadata = buildYoutubeMetadata(data);
+            io.to(socket.id).emit('playlist-updated', game.playlist);
+          })
+          .catch(err => log.warn(`[${game.id}] ytInfo échoué pour ${track.youtubeUrl} :`, err.message));
+
         downloadTrackForGame({ game, track, io, masterSocketId: socket.id })
           .catch(err => log.error(`[${game.id}] Téléchargement échoué "${track.metadata.title}" :`, err.message));
       }

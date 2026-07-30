@@ -20,7 +20,6 @@ export default function PlayerView({ playerInfo, initialState }) {
   const [artist,       setArtist]       = useState('');
   const [title,        setTitle]        = useState('');
   const [submitted,    setSubmitted]    = useState(false);
-  const [buzzed,       setBuzzed]       = useState(false);
   const [buzzOrder,    setBuzzOrder]    = useState([]);
   const [results,      setResults]      = useState(null);
   const [audioUrl,     setAudioUrl]     = useState('');
@@ -33,7 +32,19 @@ export default function PlayerView({ playerInfo, initialState }) {
   const myId   = socket.id;
   const me     = players.find(p => p.id === myId);
   const myTeam = me?.teamId ? teams.find(t => t.id === me.teamId) : null;
-  const myBuzz = buzzOrder.find(b => b.playerId === myId);
+
+  // ── Droit de buzzer : un par joueur libre, un par membre d'équipe + buzzs bonus ──
+  // pour égaliser avec la plus grande équipe (voir Game.registerBuzz côté serveur).
+  const myBuzzEntries = buzzOrder.filter(b => b.playerId === myId);
+  const canBuzz = (() => {
+    if (!myTeam) return myBuzzEntries.length === 0;
+    const teamBudget    = teams.length > 0 ? Math.max(...teams.map(t => t.players.length)) : 0;
+    const teamBuzzCount = buzzOrder.filter(b => b.teamId === myTeam.id).length;
+    if (teamBuzzCount >= teamBudget) return false;
+    if (myBuzzEntries.length === 0) return true;
+    const teammateIds = players.filter(p => p.teamId === myTeam.id).map(p => p.id);
+    return teammateIds.every(id => buzzOrder.some(b => b.playerId === id)); // buzz bonus
+  })();
 
   // Reflète toujours les dernières valeurs, pour l'auto-envoi dans le listener 'track-stopped'
   // (enregistré une seule fois au montage, donc sans accès direct aux states à jour).
@@ -74,7 +85,6 @@ export default function PlayerView({ playerInfo, initialState }) {
       setAudioUrl(url);
       setPhase('playing');
       setSubmitted(false);
-      setBuzzed(false);
       setBuzzOrder([]);
       setAnswerers(new Set());
       setResults(null);
@@ -126,7 +136,6 @@ export default function PlayerView({ playerInfo, initialState }) {
 
     function onBuzzUpdate({ buzzOrder: order }) {
       setBuzzOrder(order);
-      if (order.some(b => b.playerId === myId)) setBuzzed(true);
     }
 
     function onResultsRevealed(data) {
@@ -139,7 +148,6 @@ export default function PlayerView({ playerInfo, initialState }) {
       setArtist('');
       setTitle('');
       setSubmitted(false);
-      setBuzzed(false);
       setBuzzOrder([]);
       setResults(null);
       setAnswerers(new Set());
@@ -222,16 +230,19 @@ export default function PlayerView({ playerInfo, initialState }) {
 
   // ── Buzzer ──────────────────────────────────────────────────────────────────
   function handleBuzz() {
-    if (phase !== 'playing' || buzzed) return;
+    if (phase !== 'playing' || !canBuzz) return;
     socket.emit('buzz');
-    setBuzzed(true);
   }
 
   // ── Mon résultat dans le round ─────────────────────────────────────────────
   const myResult = results?.results?.find(r => r.playerId === myId);
 
   let buzzButtonLabel = 'BUZZ !';
-  if (buzzed) buzzButtonLabel = myBuzz ? `#${myBuzz.order} !` : 'Buzzé !';
+  if (myBuzzEntries.length > 0) {
+    buzzButtonLabel = canBuzz
+      ? 'Buzz bonus !'
+      : `#${myBuzzEntries[myBuzzEntries.length - 1].order} !`;
+  }
 
   // ── Affichage ──────────────────────────────────────────────────────────────
   return (
@@ -291,10 +302,10 @@ export default function PlayerView({ playerInfo, initialState }) {
         <div className="bg-gray-800 rounded-2xl p-4 space-y-3">
           <button
             onClick={handleBuzz}
-            disabled={phase !== 'playing' || buzzed}
+            disabled={phase !== 'playing' || !canBuzz}
             className={`w-full aspect-[3/1] rounded-2xl text-2xl font-extrabold uppercase tracking-widest
                         transition-all active:scale-95 disabled:cursor-not-allowed ${
-              buzzed
+              !canBuzz
                 ? 'bg-gray-700 text-gray-500'
                 : 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/50'
             }`}
@@ -306,7 +317,7 @@ export default function PlayerView({ playerInfo, initialState }) {
             <ol className="space-y-1">
               {buzzOrder.map(b => (
                 <li
-                  key={b.playerId}
+                  key={b.order}
                   className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg ${
                     b.playerId === myId ? 'bg-sky-900/40 border border-sky-700/40' : 'bg-gray-700/50'
                   }`}

@@ -58,8 +58,10 @@ class Game {
     // socketId → { artist, title, submittedAt }  (mode 'text')
     this.answers = new Map();
 
-    // socketId → { order, teamId, at, reactionMs }  (mode 'buzzer')
-    this.buzzes = new Map();
+    // Liste des buzzs du round : { playerId, teamId, order, at, reactionMs }[]  (mode 'buzzer')
+    // Un tableau (et non une Map) car un joueur en équipe peut buzzer plusieurs fois
+    // (buzz bonus accordé aux équipes plus petites, voir _teamBuzzBudget).
+    this.buzzes = [];
 
     // Horodatage du lancement de la piste courante (référence pour le temps de réaction)
     this.trackStartedAt = null;
@@ -142,7 +144,7 @@ class Game {
   resetRound() {
     this.answers.clear();
     this.roundAwards.clear();
-    this.buzzes.clear();
+    this.buzzes = [];
     this.trackStartedAt = null;
     this.paused = false;
   }
@@ -181,22 +183,48 @@ class Game {
   }
 
   /**
-   * Enregistre le buzz d'un joueur. Ignoré si le joueur (ou son équipe) a déjà buzzé.
-   * Retourne l'entrée créée, ou null si le buzz est ignoré.
+   * Nombre de buzzs qu'une équipe peut effectuer sur le round : un par membre,
+   * plus des buzzs bonus pour égaliser avec la plus grande équipe (ex : 3 vs 2 → l'équipe
+   * de 2 obtient un buzz bonus pour arriver à 3, comme l'équipe de 3).
+   */
+  _teamBuzzBudget(teamId) {
+    const sizes = new Map(); // teamId → nombre de membres
+    for (const p of this.players.values()) {
+      if (p.teamId) sizes.set(p.teamId, (sizes.get(p.teamId) || 0) + 1);
+    }
+    if (!sizes.has(teamId)) return 0;
+    return Math.max(...sizes.values());
+  }
+
+  /**
+   * Enregistre le buzz d'un joueur.
+   * Joueur libre (hors équipe) : un seul buzz.
+   * Joueur en équipe : un buzz par membre, plus les buzzs bonus (_teamBuzzBudget) qui ne
+   * peuvent être utilisés qu'une fois que tous les coéquipiers ont déjà buzzé une fois.
+   * Retourne l'entrée créée, ou null si le buzz est refusé.
    */
   registerBuzz(socketId) {
-    if (this.buzzes.has(socketId)) return null;
     const player = this.players.get(socketId);
     if (!player) return null;
 
-    // Le buzzer d'une équipe se verrouille dès qu'un de ses membres a buzzé.
     if (player.teamId) {
-      for (const entry of this.buzzes.values()) {
-        if (entry.teamId === player.teamId) return null;
-      }
+      const teamEntries = this.buzzes.filter(e => e.teamId === player.teamId);
+      const budget       = this._teamBuzzBudget(player.teamId);
+      if (teamEntries.length >= budget) return null; // équipe à court de buzzs
+
+      const hasAlreadyBuzzed  = teamEntries.some(e => e.playerId === socketId);
+      const teammateIds       = Array.from(this.players.values())
+        .filter(p => p.teamId === player.teamId)
+        .map(p => p.id);
+      const allTeammatesBuzzed = teammateIds.every(id => teamEntries.some(e => e.playerId === id));
+
+      // Un re-buzz (bonus) n'est possible que quand toute l'équipe a déjà buzzé une fois.
+      if (hasAlreadyBuzzed && !allTeammatesBuzzed) return null;
+    } else if (this.buzzes.some(e => e.playerId === socketId)) {
+      return null; // joueur libre : un seul buzz
     }
 
-    const order = this.buzzes.size + 1;
+    const order = this.buzzes.length + 1;
     const at    = Date.now();
     const entry = {
       playerId:   socketId,
@@ -205,13 +233,13 @@ class Game {
       at,
       reactionMs: this.trackStartedAt !== null ? at - this.trackStartedAt : null,
     };
-    this.buzzes.set(socketId, entry);
+    this.buzzes.push(entry);
     return entry;
   }
 
   /** Classement des buzzs pour le round en cours (ordre d'arrivée). */
   getLiveBuzzOrder() {
-    return Array.from(this.buzzes.values())
+    return [...this.buzzes]
       .sort((a, b) => a.order - b.order)
       .map(b => {
         const player = this.players.get(b.playerId);
@@ -269,7 +297,8 @@ class Game {
   getRoundResults() {
     const rows = [];
     for (const [socketId, player] of this.players) {
-      const buzz = this.buzzes.get(socketId) || null;
+      // Premier buzz du joueur (s'il en a fait plusieurs grâce à un buzz bonus d'équipe)
+      const buzz = this.buzzes.find(e => e.playerId === socketId) || null;
       const row = {
         playerId:      socketId,
         playerName:    player.name,
