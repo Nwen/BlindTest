@@ -178,6 +178,18 @@ export default function App() {
     setView('home');
   }, []);
 
+  // ── Fin de partie décidée par le MJ ─────────────────────────────────────────
+  // MasterView a déjà envoyé la commande et attendu la confirmation serveur (qui a
+  // aussi notifié les joueurs) ; ici on ne fait que ramener le MJ à l'accueil.
+  const handleEndGame = useCallback(() => {
+    clearSessions();
+    setMasterInfo(null);
+    setPlayerInfo(null);
+    setGameState(null);
+    setError('');
+    setView('home');
+  }, []);
+
   const inGame = (view === 'master' && masterInfo) || (view === 'player' && playerInfo);
 
   // ── Écran d'attente (hors partie uniquement : on ne démonte jamais une partie
@@ -216,6 +228,7 @@ export default function App() {
         <MasterView
           masterInfo={masterInfo}
           initialState={gameState}
+          onEndGame={handleEndGame}
         />
       )}
       {view === 'player' && playerInfo && (

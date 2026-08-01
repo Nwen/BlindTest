@@ -725,6 +725,23 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
   });
 
+  // ── Terminer la partie (le MJ y met fin pour tout le monde) ────────────────
+  socket.on('master:end-game', ({ token } = {}, cb) => {
+    const game = asMaster(socket, token);
+    if (!game) return cb?.({ ok: false, error: 'Non autorisé' });
+
+    const roomCode    = game.id;
+    const playerCount = game.players.size;
+    log.warn(`[${roomCode}] Partie terminée par le MJ — ${playerCount} joueur(s)`);
+
+    // Le MJ gère son propre retour à l'accueil via la réponse ok (il vient de confirmer
+    // l'action, inutile de lui afficher la même alerte qu'aux joueurs).
+    socket.to(roomCode).emit('game-ended', { reason: 'Le maître du jeu a terminé la partie.' });
+    gm.deleteGame(roomCode);
+    io.in(roomCode).socketsLeave(roomCode);
+    cb?.({ ok: true });
+  });
+
   // ── Déconnexion ────────────────────────────────────────────────────────────
   socket.on('disconnect', (reason) => {
     const game = gm.getGameBySocket(socket.id);

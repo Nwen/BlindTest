@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import PropTypes from 'prop-types';
 import socket from '../socket.js';
 import Scoreboard    from '../components/Scoreboard.jsx';
 import PlaylistPanel from '../components/PlaylistPanel.jsx';
@@ -11,8 +12,9 @@ import BuzzerPanel   from '../components/BuzzerPanel.jsx';
  *
  * masterInfo   : { roomCode, masterToken }
  * initialState : état du jeu récupéré à la connexion
+ * onEndGame    : appelé une fois la partie terminée côté serveur (retour à l'accueil)
  */
-export default function MasterView({ masterInfo, initialState }) {
+export default function MasterView({ masterInfo, initialState, onEndGame }) {
   const { roomCode, masterToken: token } = masterInfo;
   const resume = initialState?.resume || null;
 
@@ -343,6 +345,14 @@ export default function MasterView({ masterInfo, initialState }) {
     setShowBrowser(false);
   }
 
+  // ── Terminer la partie ─────────────────────────────────────────────────────
+  async function handleEndGame() {
+    if (!window.confirm('Terminer la partie ? Tous les joueurs seront déconnectés et elle ne pourra pas être reprise.')) return;
+    const res = await cmd('master:end-game');
+    if (res?.ok) onEndGame?.();
+    else notify(res?.error || 'Erreur');
+  }
+
   // ── Piste courante (pour le maître) ───────────────────────────────────────
   const currentTrack = playlist[currentIndex];
 
@@ -396,6 +406,15 @@ export default function MasterView({ masterInfo, initialState }) {
             {notification}
           </span>
         )}
+
+        <button
+          onClick={handleEndGame}
+          title="Terminer la partie pour tout le monde"
+          className="ml-auto text-xs text-gray-400 hover:text-red-400 border border-gray-700
+                     hover:border-red-700/50 rounded-lg px-3 py-1.5 transition-colors"
+        >
+          Terminer la partie
+        </button>
       </div>
 
       {/* Layout principal : 2 colonnes sur desktop */}
@@ -654,3 +673,14 @@ export default function MasterView({ masterInfo, initialState }) {
     </div>
   );
 }
+
+MasterView.propTypes = {
+  masterInfo: PropTypes.shape({
+    roomCode:    PropTypes.string.isRequired,
+    masterToken: PropTypes.string.isRequired,
+  }).isRequired,
+  initialState: PropTypes.object,
+  onEndGame:    PropTypes.func,
+};
+
+MasterView.defaultProps = { initialState: null, onEndGame: null };

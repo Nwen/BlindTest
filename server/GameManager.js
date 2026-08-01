@@ -559,6 +559,12 @@ class GameManager {
     if (!game) return false;
     game.destroy();
     this.games.delete(roomCode);
+    // Sans ça, les sockets encore en jeu (joueurs, MJ) restent mappés vers un code de
+    // room qui n'existe plus — inoffensif tant que le code n'est pas régénéré pour une
+    // nouvelle partie, mais autant nettoyer tout de suite.
+    for (const [socketId, code] of this.socketToRoom) {
+      if (code === roomCode) this.socketToRoom.delete(socketId);
+    }
     return true;
   }
 
