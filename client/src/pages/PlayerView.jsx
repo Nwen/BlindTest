@@ -8,43 +8,69 @@ import { teamColorClasses } from '../teamColors.js';
  * Vue joueur : écoute la musique et soumet ses réponses (mode 'text')
  * ou buzze le plus vite possible (mode 'buzzer').
  *
- * playerInfo   : { name, roomCode }
- * initialState : état initial reçu lors du join
+ * playerInfo   : { name, roomCode, playerId, playerToken }
+ * initialState : état initial reçu lors du join / de la reconnexion (avec .resume)
  */
-export default function PlayerView({ playerInfo, initialState }) {
+export default function PlayerView({ playerInfo, initialState, onLeave }) {
+  const resume = initialState?.resume || null;
+
   const [phase,        setPhase]        = useState(initialState?.phase        || 'lobby');
   const [mode,         setMode]         = useState(initialState?.mode         || 'text');
   const [players,      setPlayers]      = useState(initialState?.players      || []);
   const [teams,        setTeams]        = useState(initialState?.teams        || []);
   const [masterOnline, setMasterOnline] = useState(initialState?.masterOnline ?? true);
-  const [artist,       setArtist]       = useState('');
-  const [title,        setTitle]        = useState('');
-  const [submitted,    setSubmitted]    = useState(false);
-  const [buzzOrder,    setBuzzOrder]    = useState([]);
-  const [results,      setResults]      = useState(null);
-  const [audioUrl,     setAudioUrl]     = useState('');
+  const [artist,       setArtist]       = useState(resume?.myAnswer?.artist   || '');
+  const [title,        setTitle]        = useState(resume?.myAnswer?.title    || '');
+  const [submitted,    setSubmitted]    = useState(Boolean(resume?.myAnswer));
+  const [buzzOrder,    setBuzzOrder]    = useState(resume?.buzzOrder          || []);
+  const [results,      setResults]      = useState(resume?.results            || null);
+  const [audioUrl,     setAudioUrl]     = useState(resume?.audioUrl           || '');
   const [audioBlocked, setAudioBlocked] = useState(false);
-  const [answerers,    setAnswerers]    = useState(new Set());
-  const [gameOver,     setGameOver]     = useState(false);
+  const [answerers,    setAnswerers]    = useState(() => new Set(resume?.answered || []));
+  const [gameOver,     setGameOver]     = useState(initialState?.over ?? false);
   const [paused,       setPaused]       = useState(initialState?.paused       ?? false);
   const audioRef = useRef(null);
 
-  const myId   = socket.id;
+  const myId   = playerInfo.playerId;
   const me     = players.find(p => p.id === myId);
   const myTeam = me?.teamId ? teams.find(t => t.id === me.teamId) : null;
 
   // ── Droit de buzzer : un par joueur libre, un par membre d'équipe + buzzs bonus ──
   // pour égaliser avec la plus grande équipe (voir Game.registerBuzz côté serveur).
+  // Les coéquipiers hors ligne ne comptent pas : ils ne peuvent pas buzzer.
   const myBuzzEntries = buzzOrder.filter(b => b.playerId === myId);
   const canBuzz = (() => {
     if (!myTeam) return myBuzzEntries.length === 0;
-    const teamBudget    = teams.length > 0 ? Math.max(...teams.map(t => t.players.length)) : 0;
+    const teamSize      = t => t.players.filter(p => p.connected !== false).length;
+    const teamBudget    = teams.length > 0 ? Math.max(...teams.map(teamSize)) : 0;
     const teamBuzzCount = buzzOrder.filter(b => b.teamId === myTeam.id).length;
     if (teamBuzzCount >= teamBudget) return false;
     if (myBuzzEntries.length === 0) return true;
-    const teammateIds = players.filter(p => p.teamId === myTeam.id).map(p => p.id);
+    const teammateIds = players
+      .filter(p => p.teamId === myTeam.id && p.connected !== false)
+      .map(p => p.id);
     return teammateIds.every(id => buzzOrder.some(b => b.playerId === id)); // buzz bonus
   })();
+
+  // ── Lecture audio ──────────────────────────────────────────────────────────
+  // positionMs permet de reprendre là où en sont les autres joueurs quand on
+  // revient en cours de morceau (refresh, coupure réseau) au lieu de réécouter l'intro.
+  function startAudio(url, positionMs = 0, autoplay = true) {
+    const el = audioRef.current;
+    if (!el) return;
+    el.src = url;
+    el.load();
+    if (positionMs > 0) {
+      el.addEventListener('loadedmetadata', () => {
+        try { el.currentTime = positionMs / 1000; }
+        catch { /* flux non seekable : on repart du début */ }
+      }, { once: true });
+    }
+    if (!autoplay) return;
+    el.play()
+      .then(() => setAudioBlocked(false))
+      .catch(() => setAudioBlocked(true)); // autoplay bloqué — l'utilisateur doit débloquer le son
+  }
 
   // Reflète toujours les dernières valeurs, pour l'auto-envoi dans le listener 'track-stopped'
   // (enregistré une seule fois au montage, donc sans accès direct aux states à jour).
@@ -81,22 +107,23 @@ export default function PlayerView({ playerInfo, initialState }) {
       setPlayers(prev => prev.filter(p => p.id !== playerId));
     }
 
-    function onTrackPlaying({ audioUrl: url }) {
+    // resumed : envoyé au seul joueur qui se reconnecte, pour le remettre au diapason
+    // sans effacer ce qu'il a déjà saisi ni couper la lecture si elle tourne toujours.
+    function onTrackPlaying({ audioUrl: url, positionMs = 0, resumed = false, paused: isPaused = false }) {
       setAudioUrl(url);
       setPhase('playing');
-      setSubmitted(false);
-      setBuzzOrder([]);
-      setAnswerers(new Set());
-      setResults(null);
-      setPaused(false);
-      // Lancer l'audio
-      if (audioRef.current) {
-        audioRef.current.src = url;
-        audioRef.current.load();
-        audioRef.current.play()
-          .then(() => setAudioBlocked(false))
-          .catch(() => setAudioBlocked(true)); // autoplay bloqué — l'utilisateur doit débloquer le son
+      setPaused(isPaused);
+      if (!resumed) {
+        setSubmitted(false);
+        setBuzzOrder([]);
+        setAnswerers(new Set());
+        setResults(null);
       }
+      const el = audioRef.current;
+      if (!el) return;
+      // Coupure réseau sans interruption du son : ne pas relancer la lecture pour rien
+      if (resumed && !el.paused && el.src.includes(url)) return;
+      startAudio(url, positionMs, !isPaused);
     }
 
     function onTrackStopped() {
@@ -170,6 +197,7 @@ export default function PlayerView({ playerInfo, initialState }) {
       setMode(s.mode);
       setPlayers(s.players);
       setTeams(s.teams || []);
+      if (s.over !== undefined) setGameOver(s.over);
       if (s.masterOnline !== undefined) setMasterOnline(s.masterOnline);
       if (s.paused !== undefined) setPaused(s.paused);
     }
@@ -210,6 +238,15 @@ export default function PlayerView({ playerInfo, initialState }) {
     };
   }, []);
 
+  // ── Reprise après un refresh en pleine partie ──────────────────────────────
+  // Le serveur renvoie l'état exact du round dans `resume` : il ne reste qu'à
+  // relancer la musique à la bonne position (les autres champs sont déjà repris
+  // dans les états initiaux ci-dessus). Au montage uniquement : ensuite, ce sont
+  // les events socket qui pilotent la lecture.
+  useEffect(() => {
+    if (resume?.audioUrl) startAudio(resume.audioUrl, resume.positionMs, !resume.paused);
+  }, []);
+
   // ── Soumettre une réponse ──────────────────────────────────────────────────
   function handleSubmit(e) {
     e.preventDefault();
@@ -232,6 +269,13 @@ export default function PlayerView({ playerInfo, initialState }) {
   function handleBuzz() {
     if (phase !== 'playing' || !canBuzz) return;
     socket.emit('buzz');
+  }
+
+  // ── Quitter pour de bon ────────────────────────────────────────────────────
+  function handleLeave() {
+    if (!window.confirm('Quitter la partie ? Tes points seront perdus.')) return;
+    audioRef.current?.pause();
+    onLeave?.();
   }
 
   // ── Mon résultat dans le round ─────────────────────────────────────────────
@@ -263,6 +307,14 @@ export default function PlayerView({ playerInfo, initialState }) {
           )}
           <span className="text-sm text-gray-300 font-medium">{playerInfo.name}</span>
           <PhaseBadge phase={phase} />
+          {/* Sans ça, la partie est reprise automatiquement à chaque ouverture de la page */}
+          <button
+            onClick={handleLeave}
+            title="Quitter la partie et perdre ses points"
+            className="text-xs text-gray-500 hover:text-red-400 transition-colors px-1"
+          >
+            Quitter
+          </button>
         </div>
       </div>
 
@@ -520,15 +572,19 @@ PlayerView.propTypes = {
   playerInfo: PropTypes.shape({
     name:     PropTypes.string.isRequired,
     roomCode: PropTypes.string.isRequired,
+    playerId: PropTypes.string,
   }).isRequired,
   initialState: PropTypes.shape({
     phase:        PropTypes.string,
     mode:         PropTypes.string,
+    over:         PropTypes.bool,
     players:      PropTypes.array,
     teams:        PropTypes.array,
     masterOnline: PropTypes.bool,
     paused:       PropTypes.bool,
+    resume:       PropTypes.object,
   }),
+  onLeave: PropTypes.func,
 };
 
-PlayerView.defaultProps = { initialState: null };
+PlayerView.defaultProps = { initialState: null, onLeave: null };

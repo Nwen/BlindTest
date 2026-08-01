@@ -163,7 +163,7 @@ export default function Home({ onCreateGame, onJoinGame, onRejoinMaster, error }
               </div>
               <button
                 type="submit"
-                disabled={mjRoomCode.length < 6 || mjToken.length < 8}
+                disabled={!mjRoomCode.trim() || mjToken.trim().length < 8}
                 className="w-full bg-violet-600 hover:bg-violet-500 disabled:bg-gray-600 disabled:cursor-not-allowed
                            text-white font-semibold py-3 rounded-lg transition-colors"
               >

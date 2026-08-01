@@ -17,7 +17,15 @@ Application de blind test musical multi-joueurs, jouable en LAN ou en ligne : un
 4. Pour chaque piste : `master:play` → les joueurs répondent → `master:stop` → `master:reveal` affiche les résultats → le MJ attribue les points → `master:next` passe à la piste suivante.
 5. Phases de la partie : `lobby → playing → stopped → results` (boucle piste par piste jusqu'à la fin de la playlist).
 
-Si le MJ se déconnecte, la partie est conservée 5 minutes pour lui permettre de se reconnecter avec son token.
+### Déconnexions et reconnexions
+
+L'identité d'un joueur ne tient pas à son socket (qui change à chaque coupure) mais à un token conservé côté navigateur, si bien qu'un refresh, une perte de réseau ou un téléphone mis en veille ne coûtent ni place ni points :
+
+- Un joueur déconnecté **reste dans la partie** — score, équipe, réponses et buzzs conservés. Il apparaît « hors ligne » dans le classement et n'est réellement retiré qu'après 15 minutes d'absence (`PLAYER_RECONNECT_GRACE`).
+- Le client se reconnecte tout seul (`rejoin-player`) et reprend le round en cours : la musique redémarre **à la position réelle du morceau**, les buzzs et la réponse déjà envoyée sont restaurés.
+- Un joueur qui a perdu son token (autre appareil, cache vidé) récupère sa place en rejoignant avec le **même pseudo**, tant que ce pseudo est hors ligne.
+- Le bouton « Quitter » de la vue joueur est le seul départ définitif (suppression immédiate) : sans lui, la partie est reprise automatiquement à la réouverture de la page.
+- Si le MJ se déconnecte, la partie est conservée 5 minutes pour lui permettre de se reconnecter avec son token (`reconnect-master`, automatique après un refresh) ; il retrouve lui aussi playlist, réponses reçues, points attribués et lecteur à la bonne position.
 
 ### Modes de jeu
 

@@ -72,7 +72,12 @@ export default function TeamManager({ players, teams, onCreateTeam, onDeleteTeam
         <div className="space-y-1.5">
           {players.map(p => (
             <div key={p.id} className="flex items-center gap-2 bg-gray-700/50 rounded-lg px-2.5 py-1.5">
-              <span className="flex-1 truncate text-sm text-gray-200">{p.name}</span>
+              <span className={`flex-1 truncate text-sm ${p.connected === false ? 'text-gray-500' : 'text-gray-200'}`}>
+                {p.name}
+                {p.connected === false && (
+                  <span className="ml-1.5 text-[10px] text-orange-400/80">hors ligne</span>
+                )}
+              </span>
               <select
                 value={p.teamId || ''}
                 onChange={e => onAssignTeam(p.id, e.target.value || null)}
@@ -94,9 +99,10 @@ export default function TeamManager({ players, teams, onCreateTeam, onDeleteTeam
 
 TeamManager.propTypes = {
   players:       PropTypes.arrayOf(PropTypes.shape({
-    id:     PropTypes.string.isRequired,
-    name:   PropTypes.string.isRequired,
-    teamId: PropTypes.string,
+    id:        PropTypes.string.isRequired,
+    name:      PropTypes.string.isRequired,
+    teamId:    PropTypes.string,
+    connected: PropTypes.bool,
   })).isRequired,
   teams:         PropTypes.arrayOf(PropTypes.shape({
     id:    PropTypes.string.isRequired,

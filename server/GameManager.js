@@ -10,6 +10,12 @@ const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sans 0/O/1/I pour lisibilit
 // Délai avant suppression de la partie si le maître ne revient pas (ms)
 const MASTER_RECONNECT_GRACE = 5 * 60 * 1000; // 5 minutes
 
+// Délai avant qu'un joueur déconnecté soit réellement retiré de la partie (ms).
+// Tant qu'il n'est pas écoulé, le joueur reste dans la partie avec son score, son
+// équipe et ses réponses : un refresh, un passage en veille ou une coupure réseau
+// ne lui coûte rien.
+const PLAYER_RECONNECT_GRACE = 15 * 60 * 1000; // 15 minutes
+
 // Modes de jeu disponibles
 const GAME_MODES = new Set(['text', 'buzzer']);
 
@@ -41,11 +47,18 @@ class Game {
     // Phases : lobby | playing | stopped | results
     this.phase = 'lobby';
 
+    // Partie terminée (playlist épuisée) — distinct de la phase 'results' d'un round
+    this.over = false;
+
     // Mode de jeu : 'text' (réponse écrite) | 'buzzer' (réaction + points manuels)
     this.mode = 'text';
 
-    // socketId → { id, name, score, teamId }
+    // playerId (identifiant stable, indépendant du socket) →
+    //   { id, token, name, score, teamId, connected, socketId, reconnectTimer }
     this.players = new Map();
+
+    // socketId → playerId  (un joueur change de socketId à chaque reconnexion)
+    this.socketToPlayer = new Map();
 
     // teamId → { id, name, color }
     this.teams = new Map();
@@ -55,7 +68,7 @@ class Game {
 
     this.currentTrackIndex = -1;
 
-    // socketId → { artist, title, submittedAt }  (mode 'text')
+    // playerId → { artist, title, submittedAt }  (mode 'text')
     this.answers = new Map();
 
     // Liste des buzzs du round : { playerId, teamId, order, at, reactionMs }[]  (mode 'buzzer')
@@ -68,9 +81,14 @@ class Game {
 
     // Mode 'buzzer' : musique en pause suite à un buzz, en attente que le maître reprenne
     this.paused = false;
+    // Début de la pause en cours, et cumul des pauses depuis le lancement de la piste :
+    // permet de connaître la position de lecture exacte pour resynchroniser un joueur
+    // qui revient en cours de morceau.
+    this.pausedAt      = null;
+    this.pausedTotalMs = 0;
 
-    // Mode 'text'  : socketId → { artist: bool, title: bool }
-    // Mode 'buzzer': socketId → nombre de points attribués ce round
+    // Mode 'text'  : playerId → { artist: bool, title: bool }
+    // Mode 'buzzer': playerId → nombre de points attribués ce round
     // — attribués par le maître
     this.roundAwards = new Map();
   }
@@ -78,11 +96,103 @@ class Game {
   // ── Joueurs ────────────────────────────────────────────────────────────────
 
   addPlayer(socketId, name) {
-    this.players.set(socketId, { id: socketId, name, score: 0, teamId: null });
+    const player = {
+      id:        uuidv4(), // stable pour toute la partie, contrairement au socketId
+      token:     uuidv4(), // secret conservé côté client pour se reconnecter
+      name,
+      score:     0,
+      teamId:    null,
+      connected: true,
+      socketId,
+      reconnectTimer: null,
+    };
+    this.players.set(player.id, player);
+    this.socketToPlayer.set(socketId, player.id);
+    return player;
   }
 
-  removePlayer(socketId) {
-    this.players.delete(socketId);
+  getPlayerBySocket(socketId) {
+    const playerId = this.socketToPlayer.get(socketId);
+    return playerId ? this.players.get(playerId) || null : null;
+  }
+
+  findPlayerByToken(token) {
+    if (!token) return null;
+    for (const player of this.players.values()) {
+      if (player.token === token) return player;
+    }
+    return null;
+  }
+
+  findPlayerByName(name) {
+    const wanted = (name || '').trim().toLowerCase();
+    if (!wanted) return null;
+    for (const player of this.players.values()) {
+      if (player.name.toLowerCase() === wanted) return player;
+    }
+    return null;
+  }
+
+  /** Rattache un joueur existant à un nouveau socket (refresh, coupure réseau, reprise de pseudo). */
+  attachSocket(player, socketId) {
+    if (player.reconnectTimer) {
+      clearTimeout(player.reconnectTimer);
+      player.reconnectTimer = null;
+    }
+    if (player.socketId) this.socketToPlayer.delete(player.socketId);
+    player.socketId  = socketId;
+    player.connected = true;
+    this.socketToPlayer.set(socketId, player.id);
+    return player;
+  }
+
+  /**
+   * Marque le joueur hors ligne sans rien perdre (score, équipe, réponses, buzzs).
+   * Il n'est réellement retiré de la partie qu'une fois le délai de grâce écoulé,
+   * et `onExpire` est alors appelé.
+   */
+  detachSocket(socketId, onExpire) {
+    const player = this.getPlayerBySocket(socketId);
+    if (!player) return null;
+
+    this.socketToPlayer.delete(socketId);
+    player.socketId  = null;
+    player.connected = false;
+    player.reconnectTimer = setTimeout(() => {
+      player.reconnectTimer = null;
+      this.removePlayer(player.id);
+      onExpire?.(player);
+    }, PLAYER_RECONNECT_GRACE);
+
+    return player;
+  }
+
+  removePlayer(playerId) {
+    const player = this.players.get(playerId);
+    if (!player) return false;
+
+    if (player.reconnectTimer) clearTimeout(player.reconnectTimer);
+    if (player.socketId) this.socketToPlayer.delete(player.socketId);
+    this.players.delete(playerId);
+    this.answers.delete(playerId);
+    this.roundAwards.delete(playerId);
+    this.buzzes = this.buzzes.filter(b => b.playerId !== playerId);
+    return true;
+  }
+
+  /** Joueurs actuellement connectés (les hors ligne gardent leurs points mais ne jouent pas). */
+  connectedPlayers() {
+    return Array.from(this.players.values()).filter(p => p.connected);
+  }
+
+  /** Libère les timers en attente — appelé quand la partie est supprimée. */
+  destroy() {
+    if (this.masterReconnectTimer) clearTimeout(this.masterReconnectTimer);
+    this.masterReconnectTimer = null;
+    for (const player of this.players.values()) {
+      if (player.reconnectTimer) clearTimeout(player.reconnectTimer);
+      player.reconnectTimer = null;
+    }
   }
 
   // ── Mode de jeu ────────────────────────────────────────────────────────────
@@ -126,17 +236,66 @@ class Game {
         id:      t.id,
         name:    t.name,
         color:   t.color,
-        players: members.map(p => ({ id: p.id, name: p.name, score: this.getDisplayScore(p.id) })),
+        players: members.map(p => ({
+          id:        p.id,
+          name:      p.name,
+          score:     this.getDisplayScore(p.id),
+          connected: p.connected,
+        })),
         score:   members.reduce((sum, p) => sum + this.getDisplayScore(p.id), 0),
       };
     });
   }
 
   /** Points totaux affichés en temps réel (base + round en cours) */
-  getDisplayScore(socketId) {
-    const player = this.players.get(socketId);
+  getDisplayScore(playerId) {
+    const player = this.players.get(playerId);
     if (!player) return 0;
-    return player.score + this._roundPoints(socketId);
+    return player.score + this._roundPoints(playerId);
+  }
+
+  // ── Lecture ────────────────────────────────────────────────────────────────
+
+  /** Démarre le chronomètre de lecture d'une piste (référence des temps de réaction). */
+  startPlayback() {
+    this.trackStartedAt = Date.now();
+    this.paused         = false;
+    this.pausedAt       = null;
+    this.pausedTotalMs  = 0;
+  }
+
+  /** Retourne true si la pause a effectivement été déclenchée. */
+  pausePlayback() {
+    if (this.paused) return false;
+    this.paused   = true;
+    this.pausedAt = Date.now();
+    return true;
+  }
+
+  /** Retourne true si la lecture a effectivement repris. */
+  resumePlayback() {
+    if (!this.paused) return false;
+    if (this.pausedAt !== null) this.pausedTotalMs += Date.now() - this.pausedAt;
+    this.paused   = false;
+    this.pausedAt = null;
+    return true;
+  }
+
+  stopPlayback() {
+    if (this.paused && this.pausedAt !== null) this.pausedTotalMs += Date.now() - this.pausedAt;
+    this.paused   = false;
+    this.pausedAt = null;
+  }
+
+  /**
+   * Position de lecture courante de la piste, pauses déduites (ms).
+   * Sert à resynchroniser un joueur qui revient en cours de morceau : il reprend
+   * là où en sont les autres au lieu de réécouter l'intro.
+   */
+  getPlaybackPositionMs() {
+    if (this.trackStartedAt === null) return 0;
+    const ref = this.paused && this.pausedAt !== null ? this.pausedAt : Date.now();
+    return Math.max(0, ref - this.trackStartedAt - this.pausedTotalMs);
   }
 
   // ── Round ──────────────────────────────────────────────────────────────────
@@ -146,11 +305,13 @@ class Game {
     this.roundAwards.clear();
     this.buzzes = [];
     this.trackStartedAt = null;
-    this.paused = false;
+    this.paused         = false;
+    this.pausedAt       = null;
+    this.pausedTotalMs  = 0;
   }
 
-  submitAnswer(socketId, { artist, title }) {
-    this.answers.set(socketId, {
+  submitAnswer(playerId, { artist, title }) {
+    this.answers.set(playerId, {
       artist: (artist || '').trim(),
       title:  (title  || '').trim(),
       submittedAt: Date.now(),
@@ -183,13 +344,15 @@ class Game {
   }
 
   /**
-   * Nombre de buzzs qu'une équipe peut effectuer sur le round : un par membre,
+   * Nombre de buzzs qu'une équipe peut effectuer sur le round : un par membre connecté,
    * plus des buzzs bonus pour égaliser avec la plus grande équipe (ex : 3 vs 2 → l'équipe
    * de 2 obtient un buzz bonus pour arriver à 3, comme l'équipe de 3).
+   * Les joueurs hors ligne ne comptent pas : ils ne peuvent pas buzzer, leur équipe ne
+   * doit donc ni gagner de budget ni rester bloquée à les attendre.
    */
   _teamBuzzBudget(teamId) {
-    const sizes = new Map(); // teamId → nombre de membres
-    for (const p of this.players.values()) {
+    const sizes = new Map(); // teamId → nombre de membres connectés
+    for (const p of this.connectedPlayers()) {
       if (p.teamId) sizes.set(p.teamId, (sizes.get(p.teamId) || 0) + 1);
     }
     if (!sizes.has(teamId)) return 0;
@@ -203,8 +366,8 @@ class Game {
    * peuvent être utilisés qu'une fois que tous les coéquipiers ont déjà buzzé une fois.
    * Retourne l'entrée créée, ou null si le buzz est refusé.
    */
-  registerBuzz(socketId) {
-    const player = this.players.get(socketId);
+  registerBuzz(playerId) {
+    const player = this.players.get(playerId);
     if (!player) return null;
 
     if (player.teamId) {
@@ -212,22 +375,22 @@ class Game {
       const budget       = this._teamBuzzBudget(player.teamId);
       if (teamEntries.length >= budget) return null; // équipe à court de buzzs
 
-      const hasAlreadyBuzzed  = teamEntries.some(e => e.playerId === socketId);
-      const teammateIds       = Array.from(this.players.values())
+      const hasAlreadyBuzzed  = teamEntries.some(e => e.playerId === playerId);
+      const teammateIds       = this.connectedPlayers()
         .filter(p => p.teamId === player.teamId)
         .map(p => p.id);
       const allTeammatesBuzzed = teammateIds.every(id => teamEntries.some(e => e.playerId === id));
 
       // Un re-buzz (bonus) n'est possible que quand toute l'équipe a déjà buzzé une fois.
       if (hasAlreadyBuzzed && !allTeammatesBuzzed) return null;
-    } else if (this.buzzes.some(e => e.playerId === socketId)) {
+    } else if (this.buzzes.some(e => e.playerId === playerId)) {
       return null; // joueur libre : un seul buzz
     }
 
     const order = this.buzzes.length + 1;
     const at    = Date.now();
     const entry = {
-      playerId:   socketId,
+      playerId,
       teamId:     player.teamId || null,
       order,
       at,
@@ -255,8 +418,8 @@ class Game {
       });
   }
 
-  _roundPoints(socketId) {
-    const a = this.roundAwards.get(socketId);
+  _roundPoints(playerId) {
+    const a = this.roundAwards.get(playerId);
     if (this.mode === 'buzzer') {
       return typeof a === 'number' ? a : 0;
     }
@@ -275,8 +438,8 @@ class Game {
 
   /** Valide les points du round en cours et les ajoute au score total. */
   commitRound() {
-    for (const [socketId, player] of this.players) {
-      player.score += this._roundPoints(socketId);
+    for (const [playerId, player] of this.players) {
+      player.score += this._roundPoints(playerId);
     }
     // On vide les awards pour éviter le double-comptage si getDisplayScore est appelé après
     this.roundAwards.clear();
@@ -286,32 +449,34 @@ class Game {
 
   getPlayerList() {
     return Array.from(this.players.values()).map(p => ({
-      id:     p.id,
-      name:   p.name,
-      score:  this.getDisplayScore(p.id),
-      teamId: p.teamId || null,
+      id:        p.id,
+      name:      p.name,
+      score:     this.getDisplayScore(p.id),
+      teamId:    p.teamId || null,
+      connected: p.connected,
     }));
   }
 
   /** Résultats complets du round (pour le maître + résultats révélés) */
   getRoundResults() {
     const rows = [];
-    for (const [socketId, player] of this.players) {
+    for (const [playerId, player] of this.players) {
       // Premier buzz du joueur (s'il en a fait plusieurs grâce à un buzz bonus d'équipe)
-      const buzz = this.buzzes.find(e => e.playerId === socketId) || null;
+      const buzz = this.buzzes.find(e => e.playerId === playerId) || null;
       const row = {
-        playerId:      socketId,
+        playerId,
         playerName:    player.name,
         teamId:        player.teamId || null,
-        roundPoints:   this._roundPoints(socketId),
-        totalScore:    this.getDisplayScore(socketId),
+        connected:     player.connected,
+        roundPoints:   this._roundPoints(playerId),
+        totalScore:    this.getDisplayScore(playerId),
       };
       if (this.mode === 'buzzer') {
         row.buzz          = buzz ? { order: buzz.order, reactionMs: buzz.reactionMs } : null;
-        row.awardedPoints = this._roundPoints(socketId);
+        row.awardedPoints = this._roundPoints(playerId);
       } else {
-        row.answer = this.answers.get(socketId) || { artist: '', title: '' };
-        row.awards = this.roundAwards.get(socketId) || { artist: false, title: false };
+        row.answer = this.answers.get(playerId) || { artist: '', title: '' };
+        row.awards = this.roundAwards.get(playerId) || { artist: false, title: false };
       }
       rows.push(row);
     }
@@ -332,6 +497,7 @@ class Game {
     return {
       roomCode:          this.id,
       phase:             this.phase,
+      over:              this.over,
       mode:              this.mode,
       masterOnline:      this.masterOnline,
       players:           this.getPlayerList(),
@@ -348,6 +514,7 @@ class Game {
       roomCode:          this.id,
       masterToken:       this.masterToken,
       phase:             this.phase,
+      over:              this.over,
       mode:              this.mode,
       players:           this.getPlayerList(),
       teams:             this.getTeamList(),
@@ -387,23 +554,69 @@ class GameManager {
     return code ? this.games.get(code) : null;
   }
 
+  deleteGame(roomCode) {
+    const game = this.games.get(roomCode);
+    if (!game) return false;
+    game.destroy();
+    this.games.delete(roomCode);
+    return true;
+  }
+
+  /**
+   * Rejoint une partie par pseudo. Si un joueur hors ligne porte déjà ce pseudo,
+   * on lui rend sa place (score, équipe, réponses) au lieu d'en créer un nouveau :
+   * c'est le filet de sécurité quand le joueur a perdu son token (autre appareil,
+   * navigation privée, cache vidé).
+   */
   joinGame(roomCode, socketId, name) {
     const game = this.getGame(roomCode);
     if (!game) throw new Error('Partie introuvable');
-    if (game.phase === 'results') throw new Error('La partie est terminée');
 
-    for (const [, p] of game.players) {
-      if (p.name.toLowerCase() === name.trim().toLowerCase()) {
-        throw new Error('Ce pseudo est déjà pris');
-      }
+    const trimmed = (name || '').trim();
+    if (!trimmed) throw new Error('Pseudo invalide');
+
+    const existing = game.findPlayerByName(trimmed);
+    if (existing) {
+      if (existing.connected) throw new Error('Ce pseudo est déjà pris');
+      game.attachSocket(existing, socketId);
+      this.socketToRoom.set(socketId, game.id);
+      return { game, player: existing, reclaimed: true };
     }
 
-    game.addPlayer(socketId, name.trim());
+    if (game.phase === 'results') throw new Error('La partie est terminée');
+
+    const player = game.addPlayer(socketId, trimmed);
     this.socketToRoom.set(socketId, game.id);
-    return game;
+    return { game, player, reclaimed: false };
   }
 
-  leaveGame(socketId) {
+  /** Reconnexion d'un joueur via son token (refresh, coupure réseau, retour d'onglet). */
+  rejoinPlayer(roomCode, socketId, playerToken) {
+    const game = this.getGame(roomCode);
+    if (!game) throw new Error('Partie introuvable');
+
+    const player = game.findPlayerByToken(playerToken);
+    if (!player) throw new Error('Joueur introuvable');
+
+    game.attachSocket(player, socketId);
+    this.socketToRoom.set(socketId, game.id);
+    return { game, player };
+  }
+
+  /** Départ volontaire d'un joueur : suppression immédiate, sans délai de grâce. */
+  quitGame(socketId) {
+    const game = this.getGameBySocket(socketId);
+    if (!game) return null;
+
+    const player = game.getPlayerBySocket(socketId);
+    if (!player) return null; // le maître ne quitte pas par ce chemin
+
+    this.socketToRoom.delete(socketId);
+    game.removePlayer(player.id);
+    return { game, player };
+  }
+
+  leaveGame(socketId, onPlayerExpired) {
     const game = this.getGameBySocket(socketId);
     if (!game) return null;
 
@@ -414,14 +627,20 @@ class GameManager {
       game.masterId     = null;
       game.masterOnline = false;
       game.masterReconnectTimer = setTimeout(() => {
-        this.games.delete(game.id);
+        game.masterReconnectTimer = null;
+        this.deleteGame(game.id);
       }, MASTER_RECONNECT_GRACE);
-      return { game, masterLeft: true };
+      return { game, masterLeft: true, player: null };
     }
 
-    game.removePlayer(socketId);
-    return { game, masterLeft: false };
+    // Le joueur n'est pas retiré : il passe hors ligne et garde tout jusqu'à
+    // l'expiration du délai de grâce.
+    const player = game.detachSocket(socketId, p => onPlayerExpired?.(game, p));
+    return { game, masterLeft: false, player };
   }
 }
+
+GameManager.MASTER_RECONNECT_GRACE = MASTER_RECONNECT_GRACE;
+GameManager.PLAYER_RECONNECT_GRACE = PLAYER_RECONNECT_GRACE;
 
 module.exports = GameManager;

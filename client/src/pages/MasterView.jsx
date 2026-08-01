@@ -14,6 +14,7 @@ import BuzzerPanel   from '../components/BuzzerPanel.jsx';
  */
 export default function MasterView({ masterInfo, initialState }) {
   const { roomCode, masterToken: token } = masterInfo;
+  const resume = initialState?.resume || null;
 
   const [phase,          setPhase]        = useState(initialState?.phase    || 'lobby');
   const [mode,           setMode]         = useState(initialState?.mode    || 'text');
@@ -21,18 +22,33 @@ export default function MasterView({ masterInfo, initialState }) {
   const [teams,          setTeams]        = useState(initialState?.teams    || []);
   const [playlist,       setPlaylist]     = useState(initialState?.playlist || []);
   const [currentIndex,   setCurrentIndex] = useState(initialState?.currentTrackIndex ?? -1);
-  const [currentMeta,    setCurrentMeta]  = useState(null);
-  const [results,        setResults]      = useState([]);    // getRoundResults()
-  const [answers,        setAnswers]      = useState({});    // socketId → { artist, title }
-  const [roundAwards,    setRoundAwards]  = useState({});    // socketId → { artist, title } | points
-  const [buzzOrder,      setBuzzOrder]    = useState([]);    // classement des buzzs en direct
+  const [currentMeta,    setCurrentMeta]  = useState(resume?.metadata    || null);
+  const [results,        setResults]      = useState(resume?.results     || []);    // getRoundResults()
+  const [answers,        setAnswers]      = useState(initialState?.answers     || {}); // playerId → { artist, title }
+  const [roundAwards,    setRoundAwards]  = useState(initialState?.roundAwards || {}); // playerId → { artist, title } | points
+  const [buzzOrder,      setBuzzOrder]    = useState(initialState?.buzzOrder   || []); // classement des buzzs en direct
   const [showBrowser,    setShowBrowser]  = useState(false);
-  const [audioUrl,       setAudioUrl]     = useState('');
+  const [audioUrl,       setAudioUrl]     = useState(resume?.audioUrl || '');
   const [copied,         setCopied]       = useState(false);
-  const [gameOver,       setGameOver]     = useState(false);
+  const [gameOver,       setGameOver]     = useState(initialState?.over ?? false);
   const [notification,   setNotification] = useState('');
   const [paused,         setPaused]       = useState(initialState?.paused ?? false);
   const audioRef = useRef(null);
+
+  // Reprise du lecteur après un refresh du MJ : on repart à la position réelle du
+  // morceau. Au montage uniquement : ensuite ce sont les events socket qui pilotent.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !resume?.audioUrl) return;
+    el.src = resume.audioUrl;
+    el.load();
+    if (resume.positionMs > 0) {
+      el.addEventListener('loadedmetadata', () => {
+        try { el.currentTime = resume.positionMs / 1000; } catch { /* flux non seekable */ }
+      }, { once: true });
+    }
+    if (!resume.paused) el.play().catch(() => {});
+  }, []);
 
   // ── Events socket ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -42,6 +58,7 @@ export default function MasterView({ masterInfo, initialState }) {
       setPlayers(s.players);
       setTeams(s.teams || []);
       setCurrentIndex(s.currentTrackIndex);
+      if (s.over !== undefined) setGameOver(s.over);
       if (s.paused !== undefined) setPaused(s.paused);
     }
 
@@ -50,8 +67,18 @@ export default function MasterView({ masterInfo, initialState }) {
       notify(`${p.name} a rejoint la partie`);
     }
 
-    function onPlayerLeft({ playerId }) {
+    function onPlayerLeft({ playerId, playerName }) {
       setPlayers(prev => prev.filter(p => p.id !== playerId));
+      if (playerName) notify(`${playerName} a quitté la partie`);
+    }
+
+    // Déconnexion : le joueur reste au classement avec ses points en attendant son retour
+    function onPlayerOffline({ playerName }) {
+      if (playerName) notify(`${playerName} s'est déconnecté — ses points sont conservés`);
+    }
+
+    function onPlayerOnline({ playerName }) {
+      if (playerName) notify(`${playerName} est revenu`);
     }
 
     function onPlaylistUpdated(pl) {
@@ -63,20 +90,29 @@ export default function MasterView({ masterInfo, initialState }) {
       notify('Piste prête');
     }
 
-    function onTrackPlaying({ audioUrl: url, index }) {
+    // resumed : reçu après une reconnexion du MJ — on ne repart pas de zéro
+    function onTrackPlaying({ audioUrl: url, index, positionMs = 0, resumed = false, paused: isPaused = false }) {
       setAudioUrl(url);
       setPhase('playing');
       setCurrentIndex(index);
-      setResults([]);
-      setAnswers({});
-      setRoundAwards({});
-      setBuzzOrder([]);
-      setPaused(false);
-      if (audioRef.current) {
-        audioRef.current.src = url;
-        audioRef.current.load();
-        audioRef.current.play().catch(() => {});
+      setPaused(isPaused);
+      if (!resumed) {
+        setResults([]);
+        setAnswers({});
+        setRoundAwards({});
+        setBuzzOrder([]);
       }
+      const el = audioRef.current;
+      if (!el) return;
+      if (resumed && !el.paused && el.src.includes(url)) return; // lecture jamais interrompue
+      el.src = url;
+      el.load();
+      if (positionMs > 0) {
+        el.addEventListener('loadedmetadata', () => {
+          try { el.currentTime = positionMs / 1000; } catch { /* flux non seekable */ }
+        }, { once: true });
+      }
+      if (!isPaused) el.play().catch(() => {});
     }
 
     function onTrackMeta(meta) {
@@ -152,6 +188,8 @@ export default function MasterView({ masterInfo, initialState }) {
     socket.on('state',             onState);
     socket.on('player-joined',     onPlayerJoined);
     socket.on('player-left',       onPlayerLeft);
+    socket.on('player-offline',    onPlayerOffline);
+    socket.on('player-online',     onPlayerOnline);
     socket.on('playlist-updated',  onPlaylistUpdated);
     socket.on('track-ready',       onTrackReady);
     socket.on('track-playing',     onTrackPlaying);
@@ -171,6 +209,8 @@ export default function MasterView({ masterInfo, initialState }) {
       socket.off('state',             onState);
       socket.off('player-joined',     onPlayerJoined);
       socket.off('player-left',       onPlayerLeft);
+      socket.off('player-offline',    onPlayerOffline);
+      socket.off('player-online',     onPlayerOnline);
       socket.off('playlist-updated',  onPlaylistUpdated);
       socket.off('track-ready',       onTrackReady);
       socket.off('track-playing',     onTrackPlaying);

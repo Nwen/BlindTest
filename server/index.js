@@ -15,6 +15,10 @@ const { downloadTrackForGame, ytPlaylist, ytInfoPreferMusic, buildYoutubeMetadat
 const MEDIA_ROOT = process.env.MEDIA_ROOT || '/media';
 const PORT       = Number.parseInt(process.env.PORT || '3000', 10);
 
+// Délais de grâce (en minutes) affichés dans les logs et envoyés aux clients
+const MASTER_GRACE_MIN = Math.round(GameManager.MASTER_RECONNECT_GRACE / 60000);
+const PLAYER_GRACE_MIN = Math.round(GameManager.PLAYER_RECONNECT_GRACE / 60000);
+
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
 function ts() {
@@ -68,6 +72,121 @@ function broadcastPlayerState(game) {
   io.to(game.id).emit('state', game.getPlayerState());
 }
 
+/**
+ * Émet vers le maître courant. Son socketId change à chaque reconnexion : les
+ * callbacks asynchrones (métadonnées YouTube, téléchargements) doivent le relire
+ * au moment d'émettre plutôt que de capturer celui du départ.
+ */
+function emitToMaster(game, event, payload) {
+  if (!game.masterId) return;
+  io.to(game.masterId).emit(event, payload);
+}
+
+/** URL de streaming d'une piste (locale ou YouTube). */
+function trackAudioUrl(track) {
+  if (!track) return '';
+  return track.type === 'local'
+    ? `/api/media/stream?path=${encodeURIComponent(track.filePath)}`
+    : `/api/youtube/stream/${track.id}`;
+}
+
+/** Résumé d'un joueur pour les autres clients. */
+function publicPlayer(game, player) {
+  return {
+    id:        player.id,
+    name:      player.name,
+    score:     game.getDisplayScore(player.id),
+    teamId:    player.teamId || null,
+    connected: player.connected,
+  };
+}
+
+/**
+ * Tout ce qu'il faut à un joueur qui revient en cours de partie (refresh, coupure
+ * réseau, mise en veille du téléphone) pour retrouver exactement l'état courant :
+ * musique en cours **et sa position**, buzzs, réponses déjà envoyées, résultats.
+ */
+function buildPlayerResume(game, player) {
+  const track   = game.playlist[game.currentTrackIndex] || null;
+  const playing = game.phase === 'playing' && track;
+  return {
+    audioUrl:   playing ? trackAudioUrl(track) : '',
+    positionMs: playing ? game.getPlaybackPositionMs() : 0,
+    paused:     game.paused,
+    buzzOrder:  game.getLiveBuzzOrder(),
+    answered:   Array.from(game.answers.keys()),
+    myAnswer:   game.answers.get(player.id) || null,
+    results:    game.phase === 'results'
+      ? { metadata: track?.metadata || null, results: game.getRoundResults() }
+      : null,
+  };
+}
+
+/**
+ * Remet un joueur reconnecté au diapason via les events habituels.
+ * Nécessaire quand sa vue est déjà montée (coupure réseau sans refresh) : elle ne
+ * relit pas l'état initial, elle n'écoute que les events.
+ */
+function sendPlayerResume(socket, game, player) {
+  const resume = buildPlayerResume(game, player);
+  if (resume.audioUrl) {
+    socket.emit('track-playing', {
+      audioUrl:   resume.audioUrl,
+      index:      game.currentTrackIndex,
+      positionMs: resume.positionMs,
+      paused:     resume.paused,
+      resumed:    true,
+    });
+  }
+  if (resume.buzzOrder.length) socket.emit('buzz-update', { buzzOrder: resume.buzzOrder });
+  if (resume.results)          socket.emit('results-revealed', resume.results);
+  if (game.over)               socket.emit('game-over', { scores: game.getPlayerList() });
+}
+
+/** Idem pour le maître : lecteur, réponses reçues et points déjà attribués. */
+function buildMasterResume(game) {
+  const track   = game.playlist[game.currentTrackIndex] || null;
+  const playing = game.phase === 'playing' && track;
+  return {
+    audioUrl:   playing ? trackAudioUrl(track) : '',
+    positionMs: playing ? game.getPlaybackPositionMs() : 0,
+    paused:     game.paused,
+    metadata:   track?.metadata || null,
+    results:    game.phase === 'lobby' ? [] : game.getRoundResults(),
+  };
+}
+
+function sendMasterResume(socket, game) {
+  const resume = buildMasterResume(game);
+  if (resume.audioUrl) {
+    socket.emit('track-playing', {
+      audioUrl:   resume.audioUrl,
+      index:      game.currentTrackIndex,
+      positionMs: resume.positionMs,
+      paused:     resume.paused,
+      resumed:    true,
+    });
+  }
+  if (resume.metadata) socket.emit('track-meta', resume.metadata);
+  socket.emit('playlist-updated', game.playlist);
+  if (resume.results.length) {
+    socket.emit('answers-snapshot', {
+      answers: Object.fromEntries(game.answers),
+      awards:  Object.fromEntries(game.roundAwards),
+      results: resume.results,
+    });
+  }
+  socket.emit('buzz-update', { buzzOrder: game.getLiveBuzzOrder() });
+  if (game.over) socket.emit('game-over', { scores: game.getPlayerList() });
+}
+
+/** Le délai de grâce d'un joueur déconnecté a expiré : il quitte réellement la partie. */
+function onPlayerExpired(game, player) {
+  log.info(`[${game.id}] Joueur retiré (absent depuis ${PLAYER_GRACE_MIN} min) : "${player.name}"`);
+  io.to(game.id).emit('player-left', { playerId: player.id, playerName: player.name });
+  broadcastPlayerState(game);
+}
+
 // ─── Socket.io ────────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
@@ -89,15 +208,58 @@ io.on('connection', (socket) => {
   // ── Rejoindre en tant que joueur ───────────────────────────────────────────
   socket.on('join-game', ({ roomCode, name } = {}, cb) => {
     try {
-      const game = gm.joinGame(roomCode, socket.id, name);
+      const { game, player, reclaimed } = gm.joinGame(roomCode, socket.id, name);
       socket.join(game.id);
-      log.ok(`[${game.id}] Joueur rejoint : "${name}"  (${socket.id})  — ${game.players.size} joueur(s)`);
-      io.to(game.id).emit('player-joined', { id: socket.id, name: name.trim(), score: 0 });
-      cb?.({ ok: true, state: game.getPlayerState() });
+      log.ok(`[${game.id}] ${reclaimed ? 'Joueur repris' : 'Joueur rejoint'} : "${player.name}"  (${socket.id})  — ${game.players.size} joueur(s)`);
+      io.to(game.id).emit('player-joined', publicPlayer(game, player));
+      broadcastPlayerState(game);
+      cb?.({
+        ok:          true,
+        playerId:    player.id,
+        playerToken: player.token,
+        state:       { ...game.getPlayerState(), resume: buildPlayerResume(game, player) },
+      });
     } catch (err) {
       log.warn(`join-game échoué (code="${roomCode}", nom="${name}") :`, err.message);
       cb?.({ ok: false, error: err.message });
     }
+  });
+
+  // ── Reconnexion joueur (refresh, coupure réseau, veille du téléphone) ──────
+  // Le joueur est identifié par son token et non par son socket : il retrouve
+  // son score, son équipe et ses réponses exactement là où il les avait laissés.
+  socket.on('rejoin-player', ({ roomCode, playerToken } = {}, cb) => {
+    try {
+      const { game, player } = gm.rejoinPlayer(roomCode, socket.id, playerToken);
+      socket.join(game.id);
+      log.ok(`[${game.id}] Joueur reconnecté : "${player.name}"  (${socket.id})`);
+      socket.to(game.id).emit('player-online', { playerId: player.id, playerName: player.name });
+      broadcastPlayerState(game);
+      cb?.({
+        ok:          true,
+        playerId:    player.id,
+        playerToken: player.token,
+        state:       { ...game.getPlayerState(), resume: buildPlayerResume(game, player) },
+      });
+      sendPlayerResume(socket, game, player);
+    } catch (err) {
+      log.warn(`rejoin-player échoué (code="${roomCode}", socket=${socket.id}) :`, err.message);
+      cb?.({ ok: false, error: err.message });
+    }
+  });
+
+  // ── Quitter volontairement la partie (bouton « Quitter ») ──────────────────
+  // Contrairement à une déconnexion, le joueur est retiré tout de suite.
+  socket.on('leave-game', (cb) => {
+    const result = gm.quitGame(socket.id);
+    if (!result) return cb?.({ ok: true });
+
+    const { game, player } = result;
+    socket.leave(game.id);
+    log.info(`[${game.id}] Joueur parti : "${player.name}"`);
+    io.to(game.id).emit('player-left', { playerId: player.id, playerName: player.name });
+    broadcastPlayerState(game);
+    cb?.({ ok: true });
   });
 
   // ── Reconnexion maître (après refresh ou crash) ───────────────────────────
@@ -119,46 +281,50 @@ io.on('connection', (socket) => {
     socket.to(game.id).emit('master-online');
     broadcastPlayerState(game);
     log.ok(`[${game.id}] MJ reconnecté (${socket.id})`);
-    cb?.({ ok: true, state: game.getMasterState() });
+    cb?.({ ok: true, state: { ...game.getMasterState(), resume: buildMasterResume(game) } });
+    sendMasterResume(socket, game);
   });
 
   // ── Soumettre une réponse (joueur, mode 'text') ────────────────────────────
   socket.on('submit-answer', ({ artist, title } = {}) => {
     const game = gm.getGameBySocket(socket.id);
     if (!game || game.phase !== 'playing' || game.mode !== 'text') return;
-    if (game.masterId === socket.id) return;
 
-    game.submitAnswer(socket.id, { artist, title });
-    const player = game.players.get(socket.id);
-    log.event(`[${game.id}] Réponse de "${player?.name}" — artiste: "${artist || ''}" titre: "${title || ''}"`);
+    const player = game.getPlayerBySocket(socket.id);
+    if (!player) return; // le maître (ou un socket périmé) ne répond pas
 
-    io.to(game.masterId).emit('player-answered', {
-      playerId:   socket.id,
-      playerName: player?.name || '?',
-      answer:     { artist: (artist || '').trim(), title: (title || '').trim() },
-    });
-    socket.to(game.id).except(game.masterId).emit('someone-answered', { playerId: socket.id });
+    game.submitAnswer(player.id, { artist, title });
+    log.event(`[${game.id}] Réponse de "${player.name}" — artiste: "${artist || ''}" titre: "${title || ''}"`);
+
+    if (game.masterId) {
+      io.to(game.masterId).emit('player-answered', {
+        playerId:   player.id,
+        playerName: player.name,
+        answer:     { artist: (artist || '').trim(), title: (title || '').trim() },
+      });
+    }
+    socket.to(game.id).except(game.masterId || []).emit('someone-answered', { playerId: player.id });
   });
 
   // ── Buzzer (joueur, mode 'buzzer') ─────────────────────────────────────────
   socket.on('buzz', () => {
     const game = gm.getGameBySocket(socket.id);
     if (!game || game.phase !== 'playing' || game.mode !== 'buzzer') return;
-    if (game.masterId === socket.id) return;
 
-    const entry = game.registerBuzz(socket.id);
+    const player = game.getPlayerBySocket(socket.id);
+    if (!player) return;
+
+    const entry = game.registerBuzz(player.id);
     if (!entry) return; // déjà buzzé, ou équipe déjà verrouillée
 
-    const player    = game.players.get(socket.id);
     const buzzOrder = game.getLiveBuzzOrder();
-    log.event(`[${game.id}] Buzz #${entry.order} : "${player?.name}" (${entry.reactionMs ?? '?'}ms)`);
+    log.event(`[${game.id}] Buzz #${entry.order} : "${player.name}" (${entry.reactionMs ?? '?'}ms)`);
 
     io.to(game.id).emit('buzz-update', { buzzOrder });
 
     // Couper la musique pour tout le monde le temps que le maître juge la réponse
-    if (!game.paused) {
-      game.paused = true;
-      log.info(`[${game.id}] ⏸ Pause automatique (buzz de "${player?.name}")`);
+    if (game.pausePlayback()) {
+      log.info(`[${game.id}] ⏸ Pause automatique (buzz de "${player.name}")`);
       io.to(game.id).emit('track-paused');
     }
   });
@@ -217,7 +383,7 @@ io.on('connection', (socket) => {
       .then(data => {
         track.metadata = buildYoutubeMetadata(data);
         log.info(`[${game.id}] Métadonnées YouTube : "${track.metadata.title}" (chaîne : ${track.metadata.channel || '?'})`);
-        io.to(socket.id).emit('playlist-updated', game.playlist);
+        emitToMaster(game, 'playlist-updated', game.playlist);
       })
       .catch(err => log.warn(`[${game.id}] ytInfo échoué pour ${url} :`, err.message));
 
@@ -253,7 +419,7 @@ io.on('connection', (socket) => {
         ytInfoPreferMusic(track.youtubeUrl)
           .then(data => {
             track.metadata = buildYoutubeMetadata(data);
-            io.to(socket.id).emit('playlist-updated', game.playlist);
+            emitToMaster(game, 'playlist-updated', game.playlist);
           })
           .catch(err => log.warn(`[${game.id}] ytInfo échoué pour ${track.youtubeUrl} :`, err.message));
 
@@ -342,16 +508,15 @@ io.on('connection', (socket) => {
 
     game.currentTrackIndex = idx;
     game.phase = 'playing';
+    game.over  = false;
     game.resetRound();
-    game.trackStartedAt = Date.now();
+    game.startPlayback();
 
-    const audioUrl = track.type === 'local'
-      ? `/api/media/stream?path=${encodeURIComponent(track.filePath)}`
-      : `/api/youtube/stream/${track.id}`;
+    const audioUrl = trackAudioUrl(track);
 
     log.ok(`[${game.id}] ▶ Lecture [${idx}] : "${track.metadata.artist} — ${track.metadata.title}"  (${track.type})`);
 
-    io.to(game.id).emit('track-playing', { audioUrl, index: idx });
+    io.to(game.id).emit('track-playing', { audioUrl, index: idx, positionMs: 0 });
     io.to(socket.id).emit('track-meta', track.metadata);
     broadcastPlayerState(game);
     cb?.({ ok: true });
@@ -361,9 +526,8 @@ io.on('connection', (socket) => {
   socket.on('master:resume', ({ token } = {}, cb) => {
     const game = asMaster(socket, token);
     if (!game) return cb?.({ ok: false });
-    if (!game.paused) return cb?.({ ok: true });
+    if (!game.resumePlayback()) return cb?.({ ok: true });
 
-    game.paused = false;
     log.info(`[${game.id}] ▶ Reprise de la musique après buzz`);
     io.to(game.id).emit('track-resumed');
     cb?.({ ok: true });
@@ -374,8 +538,8 @@ io.on('connection', (socket) => {
     const game = asMaster(socket, token);
     if (!game) return cb?.({ ok: false });
 
-    game.phase  = 'stopped';
-    game.paused = false;
+    game.phase = 'stopped';
+    game.stopPlayback();
     const answersCount = game.answers.size;
     log.info(`[${game.id}] ⏹ Stop — ${answersCount}/${game.players.size} réponse(s)`);
 
@@ -524,6 +688,7 @@ io.on('connection', (socket) => {
     const nextIndex = game.currentTrackIndex + 1;
     if (nextIndex >= game.playlist.length) {
       game.phase = 'results';
+      game.over  = true;
       const scores = game.getPlayerList().map(p => `${p.name}:${p.score}pt`).join(', ');
       log.ok(`[${game.id}] Fin de partie — ${scores}`);
       io.to(game.id).emit('game-over', { scores: game.getPlayerList() });
@@ -547,14 +712,14 @@ io.on('connection', (socket) => {
     const track = game.playlist[game.currentTrackIndex];
     if (!track || track.status !== 'ready') return cb?.({ ok: false, error: 'Piste non prête' });
 
-    const audioUrl = track.type === 'local'
-      ? `/api/media/stream?path=${encodeURIComponent(track.filePath)}`
-      : `/api/youtube/stream/${track.id}`;
+    const audioUrl = trackAudioUrl(track);
 
-    game.phase  = 'playing';
-    game.paused = false;
+    game.phase = 'playing';
+    game.over  = false;
+    // La piste repart du début : le chrono des temps de réaction aussi.
+    game.startPlayback();
     log.info(`[${game.id}] ↺ Replay : "${track.metadata.artist} — ${track.metadata.title}"`);
-    io.to(game.id).emit('track-playing', { audioUrl, index: game.currentTrackIndex });
+    io.to(game.id).emit('track-playing', { audioUrl, index: game.currentTrackIndex, positionMs: 0 });
     io.to(socket.id).emit('track-meta', track.metadata);
     broadcastPlayerState(game);
     cb?.({ ok: true });
@@ -566,18 +731,19 @@ io.on('connection', (socket) => {
     const context = game ? `[${game.id}] ` : '';
     log.info(`${context}Déconnexion ${socket.id}  (${reason})`);
 
-    const result = gm.leaveGame(socket.id);
+    const result = gm.leaveGame(socket.id, onPlayerExpired);
     if (!result) return;
 
-    const { game: g, masterLeft } = result;
+    const { game: g, masterLeft, player } = result;
     if (masterLeft) {
-      log.warn(`[${g.id}] MJ déconnecté — délai de grâce 5 min`);
-      io.to(g.id).emit('master-offline', { gracePeriodMs: 5 * 60 * 1000 });
+      log.warn(`[${g.id}] MJ déconnecté — délai de grâce ${MASTER_GRACE_MIN} min`);
+      io.to(g.id).emit('master-offline', { gracePeriodMs: GameManager.MASTER_RECONNECT_GRACE });
       broadcastPlayerState(g);
-    } else {
-      const name = game?.players?.get(socket.id)?.name;
-      if (name) log.info(`[${g.id}] Joueur parti : "${name}"`);
-      io.to(g.id).emit('player-left', { playerId: socket.id });
+    } else if (player) {
+      // Le joueur n'est pas éliminé : il reste au classement avec ses points, en
+      // attendant de revenir (refresh, réseau, veille…).
+      log.info(`[${g.id}] Joueur hors ligne : "${player.name}" — points conservés ${PLAYER_GRACE_MIN} min`);
+      io.to(g.id).emit('player-offline', { playerId: player.id, playerName: player.name });
       broadcastPlayerState(g);
     }
   });

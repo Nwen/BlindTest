@@ -3,9 +3,9 @@ import { teamColorClasses } from '../teamColors.js';
 /**
  * Classement affiché pour les joueurs et dans les résultats.
  *
- * players   : [{ id, name, score, teamId }]
+ * players   : [{ id, name, score, teamId, connected }]
  * teams     : [{ id, name, color, score }]  — optionnel, pour afficher les badges/totaux d'équipe
- * myId      : socketId du joueur courant (pour le mettre en évidence)
+ * myId      : identifiant du joueur courant (pour le mettre en évidence)
  * onAdjust(playerId, delta) — optionnel : si fourni, affiche des boutons -/+ pour corriger le score (vue maître)
  */
 export default function Scoreboard({ players = [], teams = [], myId, onAdjust }) {
@@ -36,8 +36,10 @@ export default function Scoreboard({ players = [], teams = [], myId, onAdjust })
 
       <ol className="space-y-1">
         {sorted.map((p, i) => {
-          const team = p.teamId ? teamById.get(p.teamId) : null;
-          const c    = team ? teamColorClasses(team.color) : null;
+          const team    = p.teamId ? teamById.get(p.teamId) : null;
+          const c       = team ? teamColorClasses(team.color) : null;
+          // Déconnecté : il garde sa place et ses points en attendant de revenir
+          const offline = p.connected === false;
           return (
             <li
               key={p.id}
@@ -49,9 +51,17 @@ export default function Scoreboard({ players = [], teams = [], myId, onAdjust })
                 {medals[i] || <span className="text-gray-500 font-mono text-xs">{i + 1}</span>}
               </span>
               {team && <span className={`w-2 h-2 rounded-full shrink-0 ${c.dot}`} title={team.name} />}
-              <span className="flex-1 truncate font-medium">
+              <span className={`flex-1 truncate font-medium ${offline ? 'text-gray-500' : ''}`}>
                 {p.name}
                 {p.id === myId && <span className="ml-1 text-sky-400 text-xs">(moi)</span>}
+                {offline && (
+                  <span
+                    className="ml-1.5 text-[10px] text-orange-400/80"
+                    title="Déconnecté — ses points sont conservés en attendant son retour"
+                  >
+                    hors ligne
+                  </span>
+                )}
               </span>
               {onAdjust && (
                 <button

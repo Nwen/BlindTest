@@ -183,8 +183,12 @@ async function downloadTrackForGame({ game, track, io, masterSocketId }) {
   const label = `[${game.id}] YT "${track.metadata?.title || track.youtubeUrl}"`;
   console.log(`[${ts()}] ℹ ${label} — téléchargement démarré`);
 
+  // Le maître peut s'être reconnecté (et donc changer de socket) pendant le
+  // téléchargement : on résout sa destination au moment d'émettre.
+  const toMaster = () => io.to(game.masterId || masterSocketId);
+
   track.status = 'downloading';
-  io.to(masterSocketId).emit('playlist-updated', game.playlist);
+  toMaster().emit('playlist-updated', game.playlist);
 
   try {
     const localPath = await ytDownload(track.youtubeUrl, track.id);
@@ -192,13 +196,13 @@ async function downloadTrackForGame({ game, track, io, masterSocketId }) {
     track.localPath = localPath;
     track.error     = null;
     console.log(`[${ts()}] ✔ ${label} — prêt (${path.basename(localPath)})`);
-    io.to(masterSocketId).emit('playlist-updated', game.playlist);
-    io.to(masterSocketId).emit('track-ready', { trackId: track.id });
+    toMaster().emit('playlist-updated', game.playlist);
+    toMaster().emit('track-ready', { trackId: track.id });
   } catch (err) {
     track.status = 'error';
     track.error  = err.message;
     console.error(`[${ts()}] ✖ ${label} — échec :`, err.message);
-    io.to(masterSocketId).emit('playlist-updated', game.playlist);
+    toMaster().emit('playlist-updated', game.playlist);
   }
 }
 
